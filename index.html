@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pinch-Box</title>
+<link rel="icon" href="data:,">
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #d8dde6; }
+  #stage { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; }
+  canvas { display: block; background: #000; }
+  video { position: fixed; left: 0; top: 0; width: 2px; height: 2px; opacity: 0; pointer-events: none; }
+  #hud { position: fixed; inset: 0; pointer-events: none; }
+  .hud-line { position: absolute; left: 10px; bottom: 8px; padding: 3px 8px; background: rgba(0,0,0,.45); border-radius: 4px; font-size: 11px; color: #aeb7c6; }
+  .hud-help { position: absolute; left: 50%; bottom: 40px; transform: translateX(-50%); padding: 6px 12px; background: rgba(0,0,0,.5); border-radius: 6px; color: #eef2f8; font-size: 12px; transition: opacity 1.2s; white-space: nowrap; max-width: 94vw; overflow: hidden; text-overflow: ellipsis; }
+  .hud-help.fade { opacity: .0; }
+  .hud-msg { position: absolute; top: 14px; left: 50%; transform: translateX(-50%); padding: 8px 16px; background: rgba(10,14,20,.82); border: 1px solid rgba(255,255,255,.18); border-radius: 8px; font-size: 14px; max-width: 80vw; text-align: center; }
+  .hud-msg.error { border-color: #ff6b6b; color: #ffd6d6; }
+  .hud-msg.warn { border-color: #ffc14d; color: #ffeccc; }
+  .hud-msg.fatal { top: 40%; font-size: 17px; padding: 18px 26px; }
+  .hud-debug { position: absolute; top: 8px; right: 8px; width: 400px; max-height: calc(100% - 16px); overflow: auto; padding: 8px 10px; background: rgba(8,10,14,.82); border: 1px solid rgba(255,255,255,.12); border-radius: 8px; pointer-events: auto; font-size: 11px; }
+  .hud-debug pre { margin: 0 0 8px; white-space: pre-wrap; color: #9fe6c4; }
+  .hud-debug summary { cursor: pointer; margin: 6px 0; color: #fff; }
+  .row { display: grid; grid-template-columns: 138px 1fr 46px; gap: 6px; align-items: center; margin: 2px 0; }
+  .row .lab { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #b8c2d2; }
+  .row .num { text-align: right; color: #fff; }
+  .row input { width: 100%; margin: 0; }
+  .sub { color: #fff; margin: 4px 0; }
+  .presets { display: flex; gap: 4px; margin: 4px 0 6px; flex-wrap: wrap; }
+  .presets button { background: #1b2230; color: #d8dde6; border: 1px solid #38445a; border-radius: 4px; padding: 2px 8px; cursor: pointer; font: inherit; }
+  .presets button.on { background: #2f6fed; border-color: #2f6fed; color: #fff; }
+  .btnrow { display: flex; gap: 6px; margin: 6px 0; }
+  .btnrow button { background: #1b2230; color: #d8dde6; border: 1px solid #38445a; border-radius: 4px; padding: 2px 8px; cursor: pointer; font: inherit; }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="c"></canvas></div>
+<video id="v" playsinline muted></video>
+<div id="hud"></div>
+<script type="module" src="src/main.js"></script>
+<noscript>Pinch-Box needs JavaScript.</noscript>
+</body>
+</html>
