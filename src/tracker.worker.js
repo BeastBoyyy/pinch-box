@@ -1,8 +1,8 @@
 // MediaPipe HandLandmarker inference off the main thread. Classic worker (importScripts) so the
 // vendored UMD bundle can load its own WASM loader.
 //   in : {type:'init', base, cfg, delegate:'GPU'|'CPU'} | {type:'frame', bitmap, t} | {type:'cfg', cfg}
-//   out: {type:'ready', delegate} | {type:'error', msg} | {type:'result', t, w, h, inferMs, hands:[{lm,world,label,score}]}
-let landmarker = null, lastTs = 0, cfg = { minHandDetectionConfidence: 0.6, minHandPresenceConfidence: 0.6, minTrackingConfidence: 0.6 };
+//   out: {type:'ready', delegate} | {type:'error', msg} | {type:'result', t, w, h, inferMs, hands:[{lm,world,label,score}], bitmap}
+let landmarker = null, lastTs = 0, cfg = { minHandDetectionConfidence: 0.5, minHandPresenceConfidence: 0.5, minTrackingConfidence: 0.5 };
 let delegate = '';
 
 async function create(base, d) {
@@ -42,8 +42,7 @@ self.onmessage = async ev => {
       const r = landmarker.detectForVideo(m.bitmap, lastTs);
       const inferMs = performance.now() - t0;
       const w = m.bitmap.width, h = m.bitmap.height;
-      m.bitmap.close();
-      const hands = [], transfer = [];
+      const hands = [], transfer = [m.bitmap];   // the frame goes back with its landmarks so the main thread can show exactly this frame
       for (let i = 0; i < r.landmarks.length; i++) {
         const lm = new Float32Array(63), world = new Float32Array(63);
         for (let j = 0; j < 21; j++) {
@@ -55,7 +54,7 @@ self.onmessage = async ev => {
         hands.push({ lm, world, label: cat.categoryName || '', score: cat.score ?? 1 });
         transfer.push(lm.buffer, world.buffer);
       }
-      self.postMessage({ type: 'result', t: m.t, w, h, inferMs, hands }, transfer);
+      self.postMessage({ type: 'result', t: m.t, w, h, inferMs, hands, bitmap: m.bitmap }, transfer);
     }
   } catch (e) { self.postMessage({ type: 'error', msg: String(e && e.message || e) }); }
 };

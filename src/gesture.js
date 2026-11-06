@@ -13,21 +13,22 @@ export const GESTURE_DEFAULTS = {
   refractoryMs: 400,
   lookBackMs: 200,             // lock the rectangle from this long before the closing motion was first detected (120 left bbox4 boxes ~10 px collapsed)
   ringMs: 500,
-  minConf: 0.55,
+  minConf: 0.4,                // tracks recovering from rejected frames (conf down to ~0.45) stay usable; coasting is excluded separately
   maxBoxes: 12,
   effectCount: 12,
   decision: { minCutoff: 1.2, beta: 0.3, dCutoff: 1.0 }, // decision path: separate from the display path
   maxScaleRatio: 1.7,          // the two hands' scales must agree (a much smaller hand is someone else, far behind)
-  closeRate: 2.5,              // pinch ratio falling faster than this (per second) counts as the closing motion starting
+  closeRate: 4.5,              // pinch ratio falling faster than this (per second) across closeWindowMs counts as the closing motion starting
+  closeWindowMs: 100,          // a window, not one frame: MediaPipe's ratio noise (~0.1/frame) on open hands passes a one-frame test and froze the box ~2/3 of the time
   lookGain: 1.0,               // display extrapolation: fraction of (tip velocity x time-to-now) added; 0 = none
   maxLook: 0.12,               // clamp on that time, seconds
   velDeadzone: 60,             // px/s: slower fingertip drift is not extrapolated (it would only add jitter to a still hand)
-  maxSpeed: 2500,              // px/s cap on how fast the shown fingertips may catch up (a detection gap + fast hand = big jump; glide it)
+  maxSpeed: 6000,              // px/s cap on how fast the shown fingertips may catch up (a detection gap + fast hand = big jump; glide it)
   followOmega: 40, glideOmega: 14, // display follow rate (rad/s): the shown fingertips chase their targets with velocity feed-forward
 };
 
 const newHand = cfg => ({ filt: new OneEuroFilter(cfg.decision), r: NaN, rRaw: NaN, on: false, onStreak: 0, offStreak: 0,
-  candT: 0, closeT: 0, below: false, sawOpen: false, frozen: null, prevRq: 9, prevT: 0, holdUntil: 0, latchT: -1e9, latchedNow: false, usable: false, present: false });
+  candT: 0, closeT: 0, rHist: [], below: false, sawOpen: false, frozen: null, prevT: 0, holdUntil: 0, latchT: -1e9, latchedNow: false, usable: false, present: false });
 
 export class GestureEngine {
   constructor(cfg = {}) {
@@ -62,7 +63,7 @@ export class GestureEngine {
     h.latchedNow = false;
     h.present = !!(tr && tr.confirmed);
     if (!h.present) { // hand gone: pinch state resets, a dropped hand can never complete a lock
-      h.on = false; h.onStreak = 0; h.offStreak = 0; h.usable = false; h.below = false; h.sawOpen = false; h.frozen = null; h.prevT = 0; h.holdUntil = 0; h.filt.reset(); h.r = NaN; return;
+      h.on = false; h.onStreak = 0; h.offStreak = 0; h.usable = false; h.below = false; h.sawOpen = false; h.frozen = null; h.prevT = 0; h.rHist.length = 0; h.holdUntil = 0; h.filt.reset(); h.r = NaN; return;
     }
     h.usable = !tr.coasting && tr.conf >= c.minConf && tr.gates.reason === '' && Number.isFinite(tr.pinchRaw);
     if (!h.usable) return; // no new evidence this frame
@@ -72,8 +73,11 @@ export class GestureEngine {
     const rq = Math.min(h.r, h.rRaw);
     // closeT: when the closing motion was first detected = the ratio fell below OFF, OR it is dropping fast (real pinches fall
     // ~0.1 per frame; waiting for OFF costs ~3 frames and 60 px of fingertip travel before the box could be frozen)
-    const dtc = h.prevT ? (t - h.prevT) / 1000 : 0;
-    const fast = dtc > 0 && dtc < 0.2 && (h.prevRq - rq) / dtc > c.closeRate && rq < 1.3;
+    if (h.prevT && t - h.prevT > 200) h.rHist.length = 0;   // a gap: the old samples say nothing about this motion
+    h.rHist.push({ t, r: rq });
+    while (t - h.rHist[0].t > c.closeWindowMs) h.rHist.shift();
+    const old = h.rHist[0], dtc = (t - old.t) / 1000;
+    const fast = dtc >= c.closeWindowMs / 2000 && (old.r - rq) / dtc > c.closeRate && rq < 1.3;
     if (fast) h.holdUntil = t + 150;
     if (rq < this.rOff || fast) {
       if (!h.below) {
@@ -84,7 +88,7 @@ export class GestureEngine {
         h.frozen = [tp[0] - tp[4], tp[1] - tp[5], tp[2] - tp[4], tp[3] - tp[5]]; this.holdChangeT = t;   // offsets of the tips from the palm centre
       }
     } else if (t >= h.holdUntil) h.below = false;
-    h.prevRq = rq; h.prevT = t;
+    h.prevT = t;
     if (!h.below && !h.on && h.onStreak === 0 && h.frozen) { h.frozen = null; this.holdChangeT = t; }
     if (h.r >= this.rOff) h.sawOpen = true;   // a pinch only counts as a pinch if this hand was seen OPEN first (a hand that re-appears already pinched is not a gesture)
     if (!h.on) {
@@ -236,12 +240,13 @@ export class GestureEngine {
    * (slow velocities are dead-zoned). A hand that is closing keeps its pre-pinch fingertips (frozen) and the edges glide.
    * Returns the reused object this.live with .x0e..y1e.
    */
-  displayTarget(tPredMs, dt = 1 / 60) {
+  displayTarget(tPredMs, dt = 1 / 60, snap = false) {
     const lv = this.live, f = this.last, c = this.cfg, d = this._d;
     lv.x0e = lv.x0; lv.y0e = lv.y0; lv.x1e = lv.x1; lv.y1e = lv.y1;
     if (!f || !f.L || !f.R || !lv.formed || !f.L.tips || !f.R.tips) { this._dInit = false; return lv; }
     const horizon = Math.min(c.maxLook, Math.max(0, (tPredMs - f.t) / 1000)) * c.lookGain;
-    const omega = tPredMs - this.holdChangeT < 180 ? c.glideOmega : c.followOmega;
+    const gliding = tPredMs - this.holdChangeT < 180, omega = gliding ? c.glideOmega : c.followOmega;
+    if (gliding) snap = false;   // snap: synced display, the box sits exactly on the shown frame's fingertips (except while a pinch freeze glides in/out)
     const k = Math.min(1, omega * Math.min(dt, 0.1)), step = Math.min(dt, 0.1), dz = c.velDeadzone;
     for (let h = 0; h < 2; h++) {
       const tr = h ? f.R : f.L, fr = this.hand[h ? 'R' : 'L'].frozen;
@@ -253,7 +258,7 @@ export class GestureEngine {
           const i = h * 4 + j * 2 + a, v = (a ? vy : vx) * g;
           const base = fr ? tr.tips[4 + a] + fr[j * 2 + a] : tr.tips[j * 2 + a];
           const tgt = base + v * horizon;
-          if (!this._dInit) d[i] = tgt;
+          if (!this._dInit || snap) d[i] = tgt;
           else { const m = c.maxSpeed * step, dx = v * step + (tgt - d[i]) * k; d[i] += dx > m ? m : dx < -m ? -m : dx; }
         }
       }

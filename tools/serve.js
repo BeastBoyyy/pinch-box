@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 const defaultRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const port = Number(process.env.PORT) || 8080;
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.mjs': 'text/javascript', '.json': 'application/json',
-  '.wasm': 'application/wasm', '.task': 'application/octet-stream', '.mp4': 'video/mp4', '.png': 'image/png', '.css': 'text/css', '.glsl': 'text/plain', '.onnx': 'application/octet-stream', '.ico': 'image/x-icon' };
+  '.wasm': 'application/wasm', '.task': 'application/octet-stream', '.mp4': 'video/mp4', '.png': 'image/png', '.jpg': 'image/jpeg', '.css': 'text/css', '.glsl': 'text/plain', '.onnx': 'application/octet-stream', '.ico': 'image/x-icon' };
 
 /** rootDir: folder to serve (default: the project); p = 0 picks a free port. Binds to 127.0.0.1 only. */
 export function start(p = port, root = defaultRoot) {

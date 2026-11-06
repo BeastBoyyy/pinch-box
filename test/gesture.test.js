@@ -177,3 +177,12 @@ test('holding one pinch and re-pinching the other hand locks again (default re-a
   const l2 = run(strict, 220, i => { let rL = 1.2, rR = 1.2; if (i >= 20) rR = 0.05; if (i >= 26 && i < 60) rL = 0.05; else if (i >= 75 && i < 140) rL = 0.05; return { rL, rR, PL, PR }; });
   assert.equal(l2.length, 1);
 });
+
+test('ratio noise on an open hand never freezes the box; a sustained fall does', () => {
+  const g = new GestureEngine();
+  const spec = rL => ({ rL, rR: 1, PL: [300, 300], PR: [900, 500] });
+  run(g, 40, i => spec(i % 2 ? 0.9 : 1.1));   // +-0.1 per frame: what MediaPipe reports for wide-open hands
+  assert.equal(g.hand.L.frozen, null);
+  run(g, 5, i => spec(1.1 - 0.25 * (i - 39)), 40);   // a real closing motion, ~7.5/s
+  assert.ok(g.hand.L.frozen);
+});

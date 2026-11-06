@@ -15,7 +15,6 @@
     "selftest": "electron . --selftest=12 --selftest-out=qa/selftest.json"
   },
   "devDependencies": {
-    "@huggingface/transformers": "^4.2.0",
     "electron": "^45.0.0",
     "electron-builder": "^26.15.3",
     "playwright": "1.64.1",
@@ -40,6 +39,7 @@
       "tools/serve.js",
       "vendor/**",
       "models/**",
+      "assets/**",
       "fixtures/sample.mp4",
       "package.json",
       "!**/*.map"

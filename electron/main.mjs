@@ -1,5 +1,5 @@
 // Pinch-Box desktop shell: a Chromium window around the same web app, served from a private localhost server.
-// Plug and run: models, MediaPipe, the depth model and every shader are bundled, nothing is downloaded.
+// Plug and run: models, MediaPipe and every shader are bundled, nothing is downloaded.
 //   --selftest[=seconds] --selftest-out=file.json   headless-ish self check (used by the build to verify GPU / refresh rate)
 //   --live   (with --selftest) use the real/fake camera + hand tracker instead of the synthetic demo
 //   --demo                                          start in demo mode (synthetic hands, no camera needed)

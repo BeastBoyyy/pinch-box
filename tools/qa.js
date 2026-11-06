@@ -7,7 +7,7 @@ import { launch } from './browser.js';
 
 const arg = (k, d) => { const i = process.argv.indexOf('--' + k); return i >= 0 ? process.argv[i + 1] : d; };
 const port = Number(arg('port', 8125));
-const effects = (arg('effects', '1,2,3,4,5,6,7,8,9,10,11,12')).split(',').map(Number);
+const effects = (arg('effects', '1,2,3,4,5,6,7,8,9,10')).split(',').map(Number);
 const still = arg('still', '1.0'), src = arg('src', 'fixtures/sample.mp4'), only = arg('only', '');
 const extra = arg('extra', '');   // extra url params, e.g. "under=10"
 const size = arg('size', '1280x720').split('x').map(Number);

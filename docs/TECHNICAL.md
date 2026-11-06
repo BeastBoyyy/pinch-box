@@ -5,8 +5,8 @@
 Two-hand pinch-to-lock visual boxes in the browser, no TouchDesigner. A mirrored webcam feed fills the screen; hold both
 hands up with thumb and index open and a rectangle stretches between them. **Pinch with both hands** and it locks (short
 flourish) and a filter starts running inside it on the live video. Repeat: every lock stacks a new box on top and takes the
-next effect (12 effects). Reference: the 10 s TouchDesigner recording — flat crisp boxes, thin white live
-outline, sketch / posterize / quadtree / cyanotype / hologram.
+next effect (10 effects; keys 1-9 and 0 choose the next one). Reference: the 10 s TouchDesigner recording — flat crisp boxes, thin white live
+outline.
 
 Stack: `@mediapipe/tasks-vision` **1.1.1** (HandLandmarker, GPU delegate with CPU fallback, model `hand_landmarker.task`
 float16 stored in `models/`) + WebGL2. No build step, plain ES modules.
@@ -38,7 +38,7 @@ No camera? `http://localhost:8080/?src=fixtures/sample.mp4` runs a recorded clip
 ### URL parameters
 `src=file.mp4` · `fake=1` · `replay=session.json` · `delegate=cpu|gpu` · `order=10,11,12,1…` (effect order, 1-based) ·
 `debug=1` · `skeleton=1` · `effect=N&still=T[&pre=60][&under=1,2][&preset=1]` (render one effect on a fixed video time,
-used by the QA loop) · `gov=0` (disable the quality governor) · `track=0` · `qa=1` (hide HUD).
+used by the QA loop) · `gov=0` (disable the quality governor) · `track=0` · `sync=0` (show the live video with predicted landmarks instead of the tracked frame) · `qa=1` (hide HUD).
 
 ### Calibrate
 Press `C`, keep **one hand in view**: for 1.5 s hold it open (thumb and index wide), then for 1.5 s pinch firmly. The medians
@@ -82,9 +82,10 @@ src/handTrack.js  *    identity by continuity, confirmation + coasting, geometry
 src/filters.js    *    One-Euro, landmark bank, critically-damped spring
 src/gesture.js    *    pinch hysteresis, arming, look-back ring, box stack, calibrator
 src/render.js          WebGL2: video + history ring, scene, SDF box compositing + flourish, overlays, sRGB+dither blit
-src/pipeline.js        per-box targets/state, fades, governor glue      src/governor.js *  quality governor + depth back-off
-src/depthProvider.js   shared depth (model or approximate) smoothing    src/depth.worker.js  Depth Anything V2 Small (WebGPU)
-src/effects/*.js       the 12 effects (GLSL + params + 3 presets each)   src/hud.js  overlay/sliders
+src/pipeline.js        per-box targets/state, fades, governor glue      src/governor.js *  quality governor + segmentation back-off
+src/segProvider.js     shared person mask, smoothed + mipmapped         src/seg.worker.js  MediaPipe selfie segmenter
+src/blobs.js      *    blob detection + identity (blob tracking effect)
+src/effects/*.js       the 10 effects (GLSL + params + 3 presets each)   src/hud.js  overlay/sliders
 src/synthHand.js, src/synthSession.js *  synthetic hands + sessions with ground truth
 test/*.test.js, tools/{replay,qa,e2e,e2e-keys,bench,extract-landmarks,serve,setup}.js
 ```
@@ -110,7 +111,7 @@ resolution (`TEXTURE_2D_ARRAY`, filled once per camera frame via `copyTexSubImag
 own target (scaled by the governor), then is composited through a rounded-rect SDF mask (AA edge, soft shadow, hairline
 highlight, lock flourish: border flash + sweep + settle + interior flash). Final blit: sRGB + triangular dither.
 Governor: GPU timer (rAF fallback) p95 vs 0.8× refresh period; lowers the most expensive box's resolution first, then pass
-counts; recovers slowly; never touches the tracker. Depth model starts only when a depth box exists, runs ≤10 Hz and backs
+counts; recovers slowly; never touches the tracker. Segmentation starts only when a box needs the person mask, runs ≤30 Hz and backs
 off / pauses as hand inference slows.
 
 ## Deviations and decisions (read these)
@@ -119,8 +120,6 @@ off / pauses as hand inference slows.
 - **Anti-collapse reference time.** "~120 ms before pinch ON was first detected" is implemented as 120 ms before the filtered
   ratio first fell below the OFF threshold (start of the closing motion), because the ON latch lags the motion by the
   3-frame debounce plus filter delay; look-back from the latch left the rectangle partly collapsed in tests.
-- **Backdrop = region copy.** Instead of two full-screen ping-pong scenes, each box blits its own region of the scene to a
-  backdrop texture (only for effects that sample it, i.e. frosted glass). Same result, a fraction of the bandwidth.
 - **History stored sRGB-encoded in RGBA8** and decoded in `hist()` (an sRGB8 array copied from an sRGB framebuffer returned
   un-decoded values on this ANGLE build; manual encode/decode is portable).
 - `effect.init(gl)` is `init(gl, ctx)`-shaped but unused; effects get `create/destroy(ctx, box)` for per-box state.
@@ -158,50 +157,26 @@ recorded real lock attempts, no real pinching hands, and no good-light 30 fps ca
 precision/recall ≥99 %, zero non-hand locks on real footage, zero real L/R swaps and real-fingertip jitter < 0.5 px are **not
 claimed**. To measure them: record a session (`R`, `M`), `node tools/replay.js file.json`, report the numbers with your
 lighting/camera. Known weak spot: a static photo/poster of a hand is not distinguishable from a hand.
-Also unverified: Firefox/Safari, a real 60 fps webcam, the depth model on GPUs other than the test machine's.
+Also unverified: Safari, a real 60 fps webcam. Zen (Firefox 159 base) is verified on a clip and a fake camera stream: every effect compiles, tracking keeps every frame, segmentation ~4 ms.
 
 **Inference** (test machine, headless Edge, sample clip, hand model GPU delegate): 18 ms median / 29 ms p95 on the RTX 4050,
 42 ms / 71 ms on the integrated Intel UHD; CPU delegate 46–74 ms. Run `D` and read the HUD on your hardware.
 
-**Render cost per effect, governor off** (`node tools/bench.js`, 1280×720 scene, one box 66 %×76 % of the frame, GPU timer):
-
-| effect | Intel UHD (integrated) GPU ms | RTX 4050 GPU ms (median / p95) |
-|---|---|---|
-| 1 Edge sketch | 4.5 | 0.28 / 6.7 |
-| 2 Slit-scan | 1.8 | 0.09 / 6.6 |
-| 3 Moire | 1.8 | 0.29 / 6.7 |
-| 4 Pixel sort (32 passes/frame) | 7.5 | 1.9 / 7.1 |
-| 5 Frosted glass | 2.8 | 0.43 / 1.4 |
-| 6 Data-mosh | 1.9 | 0.27 / 0.8 |
-| 7 CRT | 2.9 | 0.45 / 0.9 |
-| 8 Depth map | 2.8 | 0.47 / 4.4 |
-| 9 Point cloud | 7.1 | 0.90 / 1.0 |
-| 10 Quadtree | 1.8 | 0.45 / 6.8 |
-| 11 Cyanotype | 4.8 | 0.24 / 6.8 |
-| 12 Posterize + split | 4.0 | 0.47 / 6.8 |
-| **all 12 stacked** | **29.3** | **1.8 / 2.5** |
-
-The display ran at 144 Hz (6.9 ms frames): every single effect holds the refresh on both GPUs except Pixel sort / Point
-cloud on the integrated GPU (occasional misses), and 12 stacked boxes exceed the budget there — the governor then drops box
-resolution (verified: scales fall 1.00 → 0.35 in order of cost, ~25 s at 1080p on the iGPU; the tracker is untouched). The
-RTX timer values are near the resolution limit of the timer on this hybrid-GPU laptop (median ≪ p95); treat them as
-"far below budget", not as precise.
+**Render cost per effect**: run `node tools/bench.js` (1280×720 scene, governor off, GPU timer). Renaissance painting is the heaviest: its Kuwahara pass takes 100 video taps per pixel.
 
 **Visual QA** (`node tools/qa.js` → `qa/fxNN-still.png`, `qa/fxNN-stripK.png`; clip = first 1.5 s of the reference recording
 ping-ponged, which already contains the recording's own thin white outline). Verdicts after iteration:
 
-1. **Edge sketch** — thin ink contours + faint hatching on warm paper with grain and a small colour fringe on strong edges; face readable. Matches the reference look.
-2. **Slit-scan** — time-offset wipe with two-layer blending, no visible frame stepping; hands smear into ghost trails. Subtle in a still, needs motion (clip is mostly static).
-3. **Moire** — two rotating gratings + dot grating, fringes follow the face; AA via `fwidth` (first version faded to flat navy — fixed). Two-tone navy/cream.
-4. **Pixel sort** — real odd-even transposition sort, spans visibly melt into streaks in rows; unsorted pixels stay video.
-5. **Frosted glass** — dual-Kawase blur of the backdrop (also blurs boxes beneath it), subject reads as a silhouette; rim light, grain, diagonal streak, edge dispersion.
-6. **Data-mosh** — block-matched smear of the previous output, I-frame resets and macroblock corruption flashes; corruption moved to the display pass after the first version shredded the picture into speckle.
-7. **CRT** — barrel distortion with bezel falloff, scanlines + RGB grille without moiré, bloom, misconvergence, phosphor trails.
-8. **Depth map** — Turbo/Viridis/Inferno + AA isolines + fog; with the real Depth Anything V2 Small model edges follow the silhouette (`qa/depth-model-depthmap.png`); the approximate fallback is labelled in the HUD.
-9. **Point cloud** — instanced additive points in cyan ribbons, orbiting camera, hand parallax, faint ground grid; closest to the reference hologram. Still slightly dotty at fine scale.
-10. **Quadtree** — variance-driven mip descent, crisp 1 px borders, detail on face and hands; close to the reference.
-11. **Cyanotype** — Prussian-blue → paper ramp, uneven brush edges, fibres, halation; clean.
-12. **Posterize + split** — OKLab 4-level + Bayer dither, saturated chroma, motion-driven RGB split, glow. Ordered dither shows as a checker on flat bright areas; lower with the `dither` slider.
+1. **Blob tracking** — motion mask read back through a PBO + fence (no stall), connected components in JS, ids kept by nearest centroid, overlay drawn on a 2D canvas.
+2. **Thermal vision** — person mask = hot object, skin hotter than clothes, heat bleed via a high mask LOD; ironbow / rainbow / white hot.
+3. **Night vision** — automatic gain from a high video LOD, otherwise bright rooms blow out; phosphor lag from the history ring.
+4. **Flash light** — aimed from `renderer.aim` (index tip + palm-to-tip direction per confirmed hand); wanders when no hand is tracked.
+5. **CRT** — barrel distortion with bezel falloff, scanlines + RGB grille without moiré, bloom, misconvergence, persistence. `phosphorScreen()` is shared with Pink phosphor.
+6. **1-bit dither** — tone read against a high video LOD (local exposure), outlines forced to ink.
+7. **Pink phosphor** — one phosphor on the CRT passes, long persistence, edges driven hard.
+8. **Halftone print** — per-ink rotated screens, dot area = ink coverage, K squared so only true shadows print black.
+9. **Renaissance painting** — backdrops are real paintings in `assets/renaissance/` (procedural backdrops looked vague). Sitter: unsharp-masked video regraded to oil tones, procedural satin folds on clothes, light tinted by a high mip of the painting, light wrap; then gold leaf, craquelure and a carved gilt frame. A light 4-sector Kuwahara pass supplies the brush layer.
+10. **Comic hero** — original character, box only: skin test splits flat flesh from a 3-tone suit, panel background with stepped (12 Hz) speed lines, ghost print from an offset mask, arcs at `renderer.aim` fingertips.
 
 Not looked at: fine timing of the flourish at 60/120 fps (captured as stills only: `qa/flourish-*.png`).
 

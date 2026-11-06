@@ -23,23 +23,14 @@ if (existsSync(model) && statSync(model).size > 1e6) {
   console.log('downloaded model ->', model, statSync(model).size, 'bytes');
 }
 
-// ---- depth model + runtime, so the depth effects also work with no internet -----------------------------------------------
-const tf = join(root, 'node_modules', '@huggingface', 'transformers', 'dist'), ort = join(root, 'node_modules', 'onnxruntime-web', 'dist');
-if (existsSync(tf)) {
-  const vt = join(root, 'vendor', 'transformers');
-  mkdirSync(vt, { recursive: true });
-  cpSync(join(tf, 'transformers.min.js'), join(vt, 'transformers.min.js'));   // self-contained ESM bundle (onnxruntime inlined)
-  for (const f of ['ort-wasm-simd-threaded.asyncify.mjs', 'ort-wasm-simd-threaded.asyncify.wasm']) cpSync(join(ort, f), join(vt, f));
-  console.log('copied transformers.js + onnxruntime-web (WebGPU) ->', vt);
-}
-const DEPTH = 'depth-anything-v2-small';
-const depthDir = join(root, 'models', DEPTH);
-for (const f of ['config.json', 'preprocessor_config.json', 'onnx/model_q4f16.onnx']) {
-  const dst2 = join(depthDir, f);
-  if (existsSync(dst2) && statSync(dst2).size > 100) continue;
-  mkdirSync(dirname(dst2), { recursive: true });
-  const r = await fetch(`https://huggingface.co/onnx-community/${DEPTH}/resolve/main/${f}`);
-  if (!r.ok) { console.warn(`depth model file ${f}: HTTP ${r.status} (depth effects will use the online model or the approximation)`); continue; }
-  writeFileSync(dst2, Buffer.from(await r.arrayBuffer()));
-  console.log('downloaded', f, statSync(dst2).size, 'bytes');
+// ---- person segmentation model -------------------------------------------------------------------------------------------
+const SEG_URL = 'https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter_landscape/float16/latest/selfie_segmenter_landscape.tflite';
+const seg = join(root, 'models', 'selfie_segmenter_landscape.tflite');
+if (existsSync(seg) && statSync(seg).size > 1e5) {
+  console.log('segmentation model already present');
+} else {
+  const r = await fetch(SEG_URL);
+  if (!r.ok) throw new Error(`segmentation model download failed: HTTP ${r.status}`);
+  writeFileSync(seg, Buffer.from(await r.arrayBuffer()));
+  console.log('downloaded model ->', seg, statSync(seg).size, 'bytes');
 }

@@ -9,7 +9,7 @@ export class Pipeline {
     this.list = [];                       // BoxRuntime, in stacking order (the array the renderer iterates)
     this.byId = new Map();
     this.gov = new Governor({ budgetMs });
-    this.needsDepth = false;
+    this.needsSeg = false;
     this.pendingRealloc = null;
   }
 
@@ -60,7 +60,7 @@ export class Pipeline {
   clear(nowMs) { for (const b of this.list) if (!b.removing) { b.removing = true; b.removedAt = nowMs; } }
   last() { for (let i = this.list.length - 1; i >= 0; i--) if (!this.list[i].removing) return this.list[i]; return null; }
 
-  _refreshFlags() { this.needsDepth = this.list.some(b => !b.removing && b.effect.needsDepth); }
+  _refreshFlags() { this.needsSeg = this.list.some(b => !b.removing && b.effect.needsSeg); }
 
   /** scene size changed: rect fractions stay, RTs need new pixel sizes */
   reallocAll() { for (const b of this.list) { if (b.rt) this._free(b); this._alloc(b); } }
