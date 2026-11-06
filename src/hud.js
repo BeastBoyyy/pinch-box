@@ -12,7 +12,7 @@ export class Hud {
     this.line = $('div', 'hud-line', root);
     this.msg = $('div', 'hud-msg', root); this.msg.hidden = true;
     this.help = $('div', 'hud-help', root,
-      'Both hands up, thumb + index open  ·  pinch both to lock  ·  U undo  ·  Esc clear  ·  C calibrate  ·  D debug  ·  R record  ·  S skeleton  ·  Space pause');
+      'Both hands up, thumb + index open  ·  pinch both to lock  ·  0-9 pick effect  ·  P preset  ·  U undo  ·  Esc clear  ·  C calibrate  ·  D debug  ·  R record  ·  S skeleton  ·  Space pause');
     this.debug = $('div', 'hud-debug', root); this.debug.hidden = true;
     this.fallbackBanner = null;
     this.msgTimer = 0;
@@ -72,7 +72,7 @@ export class Hud {
     const s = this.getState();
     this.line.textContent = `capture ${f1(s.captureFps)} fps · inference ${f1(s.inferMs)} ms (${s.delegate || '…'}) · latency ${f1(s.latencyMs)} ms · render ${f1(s.renderFps)} fps` + (s.refreshHz ? ` (display ${Math.round(s.refreshHz)} Hz)` : '') +
       (s.gpuMs ? ` · gpu ${f1(s.gpuMs)} ms` : '') + ` · boxes ${s.boxes ?? 0}` + (s.paused ? ' · TRACKING PAUSED' : '') + (s.recording ? ' · ● REC ' + s.recording : '') +
-      (s.blocker ? ' · ' + s.blocker : '') + (s.depthMode ? ` · depth: ${s.depthMode === 'approx' ? 'approximate' : 'model'}` : '');
+      (s.blocker ? ' · ' + s.blocker : '');
     if (this.debug.hidden || !this.built) return;
     const lines = [];
     lines.push(`camera  ${s.cam || ''}`);

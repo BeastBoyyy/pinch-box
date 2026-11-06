@@ -57,6 +57,37 @@ void main() {
   fragColor = vec4(c, 1.0);
 }`;
 
+/** the phosphor screen passes (bloom, persistence, scanlines, mask) around a first pass `base`; params need curve/bleed/conv/scan/pitch/mask/bloom/persist/flicker */
+export const phosphorScreen = (key, base) => ({
+  init() {},
+  create(ctx, box) {
+    const w = box.rt.w, h = box.rt.h, qw = Math.max(8, w >> 2), qh = Math.max(8, h >> 2);
+    box.state = { base: ctx.rt(w, h), phos: [ctx.rt(w, h), ctx.rt(w, h)], cur: 0, b1: ctx.rt(qw, qh), b2: ctx.rt(qw, qh), first: true };
+  },
+  destroy(ctx, box) { const s = box.state; if (s) { ctx.freeRT(s.base); ctx.freeRT(s.phos[0]); ctx.freeRT(s.phos[1]); ctx.freeRT(s.b1); ctx.freeRT(s.b2); box.state = null; } },
+  render(ctx, box, t) {
+    const gl = ctx.gl, st = box.state;
+    gl.disable(gl.BLEND);
+    ctx.bind(st.base); const pb = ctx.prog(key + '-base', base); ctx.common(pb, box, t); ctx.draw();
+    // bloom: bright-pass -> separable blur (1/4 res)
+    ctx.bind(st.b1); const pbr = ctx.prog('crt-bright', BRIGHT); pbr.use(); pbr.tex(5, st.base.tex, 'uSrc'); pbr.f('uTh', 0.55); ctx.draw();
+    const pbl = ctx.prog('crt-blur', BLUR); pbl.use();
+    ctx.bind(st.b2); pbl.tex(5, st.b1.tex, 'uSrc'); pbl.f2('uDir', 1 / st.b1.w, 0); ctx.draw();
+    ctx.bind(st.b1); pbl.tex(5, st.b2.tex, 'uSrc'); pbl.f2('uDir', 0, 1 / st.b1.h); ctx.draw();
+    ctx.bind(st.b2); pbl.tex(5, st.b1.tex, 'uSrc'); pbl.f2('uDir', 2 / st.b1.w, 0); ctx.draw();
+    ctx.bind(st.b1); pbl.tex(5, st.b2.tex, 'uSrc'); pbl.f2('uDir', 0, 2 / st.b1.h); ctx.draw();
+    // phosphor persistence: decay is per 1/60 s so it is refresh-rate independent
+    const next = 1 - st.cur;
+    ctx.bind(st.phos[next]); const pp = ctx.prog('crt-persist', PERSIST); pp.use();
+    pp.tex(5, st.base.tex, 'uSrc'); pp.tex(6, st.phos[st.cur].tex, 'uPrev');
+    pp.f('uDecay', st.first ? 0 : Math.pow(box.params.persist, Math.min(ctx.dt, 0.1) * 60)); ctx.draw();
+    st.cur = next; st.first = false;
+    ctx.bind(box.rt);
+    const pf = ctx.prog(key + '-final', FINAL); ctx.common(pf, box, t);
+    pf.tex(5, st.phos[st.cur].tex, 'uPhos'); pf.tex(6, st.b1.tex, 'uBloom'); ctx.draw();
+  },
+});
+
 export default defineEffect({
   name: 'CRT',
   cost: 2.2,
@@ -76,31 +107,5 @@ export default defineEffect({
     { name: 'Worn arcade', values: { curve: 1.6, scan: 0.8, mask: 1, bloom: 1.3, bleed: 2, conv: 2, persist: 0.9 } },
     { name: 'Clean trinitron', values: { curve: 0.4, scan: 0.3, pitch: 2, mask: 0.45, bloom: 0.5, conv: 0.4, flicker: 0.3 } },
   ],
-  init() {},
-  create(ctx, box) {
-    const w = box.rt.w, h = box.rt.h, qw = Math.max(8, w >> 2), qh = Math.max(8, h >> 2);
-    box.state = { base: ctx.rt(w, h), phos: [ctx.rt(w, h), ctx.rt(w, h)], cur: 0, b1: ctx.rt(qw, qh), b2: ctx.rt(qw, qh), first: true };
-  },
-  destroy(ctx, box) { const s = box.state; if (s) { ctx.freeRT(s.base); ctx.freeRT(s.phos[0]); ctx.freeRT(s.phos[1]); ctx.freeRT(s.b1); ctx.freeRT(s.b2); box.state = null; } },
-  render(ctx, box, t) {
-    const gl = ctx.gl, st = box.state;
-    gl.disable(gl.BLEND);
-    ctx.bind(st.base); const pb = ctx.prog('crt-base', BASE); ctx.common(pb, box, t); ctx.draw();
-    // bloom: bright-pass -> separable blur (1/4 res)
-    ctx.bind(st.b1); const pbr = ctx.prog('crt-bright', BRIGHT); pbr.use(); pbr.tex(5, st.base.tex, 'uSrc'); pbr.f('uTh', 0.55); ctx.draw();
-    const pbl = ctx.prog('crt-blur', BLUR); pbl.use();
-    ctx.bind(st.b2); pbl.tex(5, st.b1.tex, 'uSrc'); pbl.f2('uDir', 1 / st.b1.w, 0); ctx.draw();
-    ctx.bind(st.b1); pbl.tex(5, st.b2.tex, 'uSrc'); pbl.f2('uDir', 0, 1 / st.b1.h); ctx.draw();
-    ctx.bind(st.b2); pbl.tex(5, st.b1.tex, 'uSrc'); pbl.f2('uDir', 2 / st.b1.w, 0); ctx.draw();
-    ctx.bind(st.b1); pbl.tex(5, st.b2.tex, 'uSrc'); pbl.f2('uDir', 0, 2 / st.b1.h); ctx.draw();
-    // phosphor persistence: decay is per 1/60 s so it is refresh-rate independent
-    const next = 1 - st.cur;
-    ctx.bind(st.phos[next]); const pp = ctx.prog('crt-persist', PERSIST); pp.use();
-    pp.tex(5, st.base.tex, 'uSrc'); pp.tex(6, st.phos[st.cur].tex, 'uPrev');
-    pp.f('uDecay', st.first ? 0 : Math.pow(box.params.persist, Math.min(ctx.dt, 0.1) * 60)); ctx.draw();
-    st.cur = next; st.first = false;
-    ctx.bind(box.rt);
-    const pf = ctx.prog('crt-final', FINAL); ctx.common(pf, box, t);
-    pf.tex(5, st.phos[st.cur].tex, 'uPhos'); pf.tex(6, st.b1.tex, 'uBloom'); ctx.draw();
-  },
+  ...phosphorScreen('crt', BASE),
 });

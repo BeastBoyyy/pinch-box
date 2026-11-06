@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { Governor, depthInterval, refreshPeriod } from '../src/governor.js';
+import { Governor, segInterval, refreshPeriod } from '../src/governor.js';
 
 const feed = (g, boxes, ms, n) => { for (let i = 0; i < n; i++) { g.add(ms); g.update(boxes); } };
 
@@ -28,11 +28,11 @@ test('within budget nothing changes', () => {
   feed(g, boxes, 11, 500); assert.equal(boxes[0].scale, 1); assert.equal(g.passLevel, 1);
 });
 
-test('depth backs off as hand-tracking inference slows, and pauses under pressure', () => {
-  assert.equal(depthInterval(10), 100);
-  assert.ok(depthInterval(26) > 100 && depthInterval(26) < 500);
-  assert.equal(depthInterval(40), Infinity);
-  assert.equal(depthInterval(NaN), Infinity);
+test('segmentation backs off as hand-tracking inference slows, and pauses under pressure', () => {
+  assert.equal(segInterval(10), 33);
+  assert.ok(segInterval(26) > 33 && segInterval(26) < 165);
+  assert.equal(segInterval(40), Infinity);
+  assert.equal(segInterval(NaN), Infinity);
 });
 
 test('refresh period snaps to a standard rate and is not fooled by overload', () => {

@@ -30,10 +30,9 @@ async function measure(url, label) {
   rows.push({ label, gpuMedian: med(r.gpuS), gpuP95: p95(r.gpuS), frameMedian: med(r.dts), frameP95: p95(r.dts), errors: errs.length });
   console.log(label.padEnd(28), `gpu median ${med(r.gpuS).toFixed(2)} ms  p95 ${p95(r.gpuS).toFixed(2)} ms | frame median ${med(r.dts).toFixed(1)} ms  p95 ${p95(r.dts).toFixed(1)} ms${errs.length ? '  ERRORS ' + errs[0] : ''}`);
 }
-await measure(`http://localhost:${port}/index.html?effect=1&gov=0&qa=1&src=fixtures/sample.mp4&under=`, 'baseline (edge, ref only)');
-const names = ['Edge sketch', 'Slit-scan', 'Moire', 'Pixel sort', 'Frosted glass', 'Data-mosh', 'CRT', 'Depth map', 'Point cloud', 'Quadtree', 'Cyanotype', 'Posterize+split'];
-for (let n = 1; n <= 12; n++) await measure(`http://localhost:${port}/index.html?effect=${n}&gov=0&qa=1&src=fixtures/sample.mp4`, `${n}. ${names[n - 1]}`);
-await measure(`http://localhost:${port}/index.html?effect=12&under=1,2,3,4,5,6,7,8,9,10,11&gov=0&qa=1&src=fixtures/sample.mp4`, 'all 12 stacked');
+await measure(`http://localhost:${port}/index.html?effect=6&gov=0&qa=1&src=fixtures/sample.mp4&under=`, 'baseline (dither, ref only)');
+const names = ['Blob tracking', 'Thermal vision', 'Night vision', 'Flash light', 'CRT', '1-bit dither', 'Pink phosphor', 'Halftone print', 'Renaissance painting', 'Comic hero'];
+for (let n = 1; n <= names.length; n++) await measure(`http://localhost:${port}/index.html?effect=${n}&gov=0&qa=1&src=fixtures/sample.mp4`, `${n}. ${names[n - 1]}`);
 await browser.close(); srv.close();
 writeFileSync('qa/bench.json', JSON.stringify({ gpu, size, frames, rows }, null, 1));
 console.log('GPU:', gpu);

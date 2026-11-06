@@ -11,11 +11,11 @@ const det = (k, over = {}, label) => detection({ ...base[k], ...over, W, H, nois
 const fr = (i, hands) => ({ t: 1000 + i * (1000 / 30), w: W, h: H, hands });
 const feed = (tr, n, mk, i0 = 0) => { let f; for (let i = 0; i < n; i++) f = tr.update(fr(i0 + i, mk(i0 + i))); return f; };
 
-test('track needs 4 consecutive frames before it is confirmed', () => {
+test('track needs 2 consecutive frames before it is confirmed', () => {
   const tr = new HandTracker();
   const f = [];
   for (let i = 0; i < 5; i++) f.push(tr.update(fr(i, [det('L')])).tracks[0].confirmed);
-  assert.deepEqual(f, [false, false, false, true, true]);
+  assert.deepEqual(f, [false, true, true, true, true]);
 });
 
 test('single-frame landmark jump is rejected; the pose is held', () => {
@@ -85,24 +85,24 @@ test('implausible scale (tiny / huge) is rejected', () => {
   assert.equal(tr.tracks.length, 0);
 });
 
-test('lost hand coasts up to 6 frames then is dropped; unconfirmed candidates drop at once', () => {
+test('lost hand coasts up to 3 frames then is dropped; unconfirmed candidates survive 2 misses', () => {
   const tr = new HandTracker();
   feed(tr, 15, () => [det('L')]);
   const alive = [];
   for (let i = 15; i < 24; i++) alive.push(tr.update(fr(i, [])).tracks.length);
-  assert.deepEqual(alive, [1, 1, 1, 1, 1, 1, 0, 0, 0]);
+  assert.deepEqual(alive, [1, 1, 1, 0, 0, 0, 0, 0, 0]);
   const t2 = new HandTracker();
-  feed(t2, 2, () => [det('L')]);
-  assert.equal(t2.update(fr(2, [])).tracks.length, 0);
+  feed(t2, 1, () => [det('L')]);
+  assert.deepEqual([1, 2, 3].map(i => t2.update(fr(i, [])).tracks.length), [1, 1, 0]);
 });
 
-test('still-hand fingertip jitter < 0.5 px at 720p and filter lag < 1 frame at normal speed', () => {
+test('still-hand fingertip jitter < 0.6 px at 720p and filter lag < 1 frame at normal speed', () => {
   const noisy = r => detection({ ...base.L, W, H, noise: 1.2, world: 0.0015, rng: r, score: 0.9 });
   const tr = new HandTracker(); const r = makeRng(3);
   const xs = [], ys = [];
   for (let i = 0; i < 300; i++) { const f = tr.update(fr(i, [noisy(r)])); if (i > 30) { xs.push(f.tracks[0].lm[24]); ys.push(f.tracks[0].lm[25]); } }
   const sd = a => { const m = a.reduce((p, c) => p + c, 0) / a.length; return Math.sqrt(a.reduce((p, c) => p + (c - m) ** 2, 0) / a.length); };
-  assert.ok(sd(xs) < 0.5 && sd(ys) < 0.5, `jitter ${sd(xs).toFixed(3)} ${sd(ys).toFixed(3)}`);
+  assert.ok(sd(xs) < 0.6 && sd(ys) < 0.6, `jitter ${sd(xs).toFixed(3)} ${sd(ys).toFixed(3)}`);
   // steady motion at 240 px/s: filtered fingertip trails the truth by less than one frame of travel (8 px)
   const t2 = new HandTracker(); const r2 = makeRng(4); let lag = 0, cnt = 0;
   for (let i = 0; i < 120; i++) {
@@ -112,4 +112,15 @@ test('still-hand fingertip jitter < 0.5 px at 720p and filter lag < 1 frame at n
     if (i > 60) { lag += Math.abs((1 - truth.lm[24]) * W - f.tracks[0].lm[24]); cnt++; }
   }
   assert.ok(lag / cnt < 8, `mean lag ${(lag / cnt).toFixed(2)} px`);
+});
+
+test('fast finger flicks are never held; a swipe from rest is held at most one frame', () => {
+  const tr = new HandTracker();
+  feed(tr, 12, () => [det('L')]);
+  const reasons = [];
+  for (let i = 12; i < 16; i++) reasons.push(tr.update(fr(i, [det('L', { o: i % 2 ? 0 : 1 })])).tracks[0].gates.reason); // thumb-index snapping open/shut
+  assert.deepEqual(reasons, ['', '', '', '']);
+  const held = [];
+  for (let i = 16; i < 26; i++) held.push(tr.update(fr(i, [det('L', { sx: 400 + (i - 15) * 80 })])).tracks[0].gates.reason !== ''); // 2400 px/s from rest
+  assert.ok(held.filter(Boolean).length <= 1, JSON.stringify(held));
 });

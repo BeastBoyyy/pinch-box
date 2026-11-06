@@ -1,5 +1,5 @@
 // WebGL2 renderer: linear-light half-float scene, shared camera texture + 96-frame history ring,
-// backdrop copies for stacking, SDF-masked box compositing with lock flourish, overlays, sRGB+dither blit.
+// SDF-masked box compositing with lock flourish, overlays, sRGB+dither blit.
 // The render loop allocates nothing: all buffers/targets are created up front or on resize/lock.
 import { Program, VERT, COMMON, createRT, freeRT } from './gl.js';
 
@@ -105,12 +105,12 @@ export class Renderer {
     this.vao = gl.createVertexArray(); gl.bindVertexArray(this.vao);
     this.programs = new Map();
     this.sceneW = 0; this.sceneH = 0; this.videoW = 0; this.videoH = 0;
-    this.scene = null; this.backdrop = null; this.hist = null;
-    this.tex = { video: null, history: null, backdrop: null, depth: null, noise: null };
+    this.scene = null; this.hist = null;
+    this.tex = { video: null, history: null, seg: null, noise: null };
     this.histHead = 0; this.histCount = 0; this.histSize = [2, 2];
     this.newFrame = false; this.frameId = 0; this.time = 0; this.dt = 0.016; this.passLevel = 1;
-    this.depth = null;                    // DepthProvider, set by the app
-    this.hand = { x: 0, y: 0 };          // head/hand parallax input for the point cloud (-1..1)
+    this.seg = null;                      // SegProvider, set by the app
+    this.aim = { n: 0, p: new Float32Array(8) };   // up to 2 hands: index tip x, y and palm->tip direction x, y (scene uv, y up)
     this.settings = { cornerRadius: 3, shadow: 1, exposure: 1, skeleton: false, debug: false };
     this.stats = { renderFps: 0, frameMs: 0, gpuMs: 0 };
     this._fpsN = 0; this._fpsT = 0;
@@ -128,6 +128,9 @@ export class Renderer {
     this.pFlat = new Program(gl, FRAG_FLAT, VERT_PTS, 'flat');
     this.flatLoc = gl.getAttribLocation(this.pFlat.p, 'aPos');
     this._makeNoise();
+    const none = this.tex.seg = gl.createTexture();   // no person yet: an empty mask
+    gl.bindTexture(gl.TEXTURE_2D, none); gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, 1, 1, 0, gl.RED, gl.UNSIGNED_BYTE, new Uint8Array(1));
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
   }
 
   // ---- context API used by effects -------------------------------------------------------------
@@ -157,8 +160,8 @@ export class Renderer {
     p.tex(1, this.tex.history, 'uHist', this.gl.TEXTURE_2D_ARRAY);
     p.f('uHistHead', this.histHead); p.f('uHistCount', this.histCount);
   }
-  /** shared smoothed depth (unit 3) + its size; call after ctx.common() */
-  depthUniforms(p) { p.tex(3, this.tex.depth, 'uDepth'); p.f2('uDepthSize', this.depth.size[0], this.depth.size[1]); }
+  /** shared person mask (unit 3) + its size; call after ctx.common() */
+  segUniforms(p) { p.tex(3, this.tex.seg, 'uSeg'); p.f2('uSegSize', this.seg.size[0], this.seg.size[1]); }
   boxSize(box) { return [Math.max(8, Math.round(box.rect.w * this.sceneW * box.scale)), Math.max(8, Math.round(box.rect.h * this.sceneH * box.scale))]; }
 
   // ---- setup ----------------------------------------------------------------------------------
@@ -184,10 +187,8 @@ export class Renderer {
     if (bw === this.sceneW && bh === this.sceneH) return false;
     this.canvas.width = bw; this.canvas.height = bh;
     this.sceneW = bw; this.sceneH = bh;
-    freeRT(gl, this.scene); freeRT(gl, this.backdrop);
+    freeRT(gl, this.scene);
     this.scene = createRT(gl, bw, bh, { format: 'rgba16f' });
-    this.backdrop = createRT(gl, bw, bh, { format: 'rgba16f' });
-    this.tex.backdrop = this.backdrop.tex;
     return true; // caller must resize box targets
   }
 
@@ -214,12 +215,13 @@ export class Renderer {
     this.histHead = 0; this.histCount = 0;
   }
 
-  onCameraFrame() { this.pendingVideo = true; }
+  /** bitmap: the frame the tracker just processed (synced mode; already flipped, closed after upload). None: the live <video>. */
+  onCameraFrame(bitmap) { this.pendingVideo = true; if (bitmap) { this.pendingBitmap?.close(); this.pendingBitmap = bitmap; } }
 
-  _uploadVideo(video) {
+  _uploadVideo(video, flip = true) {
     const gl = this.gl;
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.tex.video);
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, flip);   // WebGL ignores this for ImageBitmaps, hence the pre-flipped bitmap
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, video);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
     gl.generateMipmap(gl.TEXTURE_2D);
@@ -236,17 +238,6 @@ export class Renderer {
   }
 
   // ---- per-frame ------------------------------------------------------------------------------
-  /** copy the box's region of the accumulated scene into the backdrop texture (for glass / stacking-aware effects) */
-  _copyBackdrop(box) {
-    const gl = this.gl;
-    const x0 = Math.max(0, Math.floor(box.rect.x * this.sceneW)), y0 = Math.max(0, Math.floor(box.rect.y * this.sceneH));
-    const x1 = Math.min(this.sceneW, Math.ceil((box.rect.x + box.rect.w) * this.sceneW)), y1 = Math.min(this.sceneH, Math.ceil((box.rect.y + box.rect.h) * this.sceneH));
-    if (x1 <= x0 || y1 <= y0) return;
-    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.scene.fbo); gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this.backdrop.fbo);
-    gl.blitFramebuffer(x0, y0, x1, y1, x0, y0, x1, y1, gl.COLOR_BUFFER_BIT, gl.NEAREST);
-    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null); gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
-  }
-
   _composite(box, nowMs) {
     const gl = this.gl, r = box.rect;
     const lock = Math.min(1, (nowMs - box.lockedAt) / 320), e = 1 - Math.pow(1 - Math.min(1, lock * 1.4), 3);
@@ -360,13 +351,12 @@ export class Renderer {
     const gl = this.gl;
     this.dt = dt; this.time = t; this.frameId++;
     this.newFrame = false;
-    if (this.pendingVideo && view.video && view.video.readyState >= 2) { this.pendingVideo = false; this._uploadVideo(view.video); }
+    if (this.pendingBitmap) { const b = this.pendingBitmap; this.pendingBitmap = null; this.pendingVideo = false; this._uploadVideo(b, false); b.close(); }
+    else if (this.pendingVideo && view.video && view.video.readyState >= 2) { this.pendingVideo = false; this._uploadVideo(view.video); }
     if (!this.tex.video || !this.scene) return;
     this._gpuBegin();
-    if (view.needsDepth && this.depth) this.depth.update(this, dt, this.newFrame);
-    // fixed texture units for every effect: 0 video, 1 history array, 2 backdrop, 3 depth, 4 noise
-    gl.activeTexture(gl.TEXTURE0 + 2); gl.bindTexture(gl.TEXTURE_2D, this.tex.backdrop);
-    if (this.tex.depth) { gl.activeTexture(gl.TEXTURE0 + 3); gl.bindTexture(gl.TEXTURE_2D, this.tex.depth); }
+    // fixed texture units for every effect: 0 video, 1 history array, 3 person mask, 4 noise
+    gl.activeTexture(gl.TEXTURE0 + 3); gl.bindTexture(gl.TEXTURE_2D, this.tex.seg);
     gl.activeTexture(gl.TEXTURE0 + 4); gl.bindTexture(gl.TEXTURE_2D, this.tex.noise);
     // 1. camera frame fills the scene (mirrored)
     this.bind(this.scene); gl.disable(gl.BLEND);
@@ -376,7 +366,6 @@ export class Renderer {
     for (let i = 0; i < boxes.length; i++) {
       const b = boxes[i];
       if (!b.rt) continue;
-      if (b.effect.needsBackdrop) this._copyBackdrop(b);
       this.bind(b.rt);
       b.effect.render(this, b, t);
       this._composite(b, view.nowMs);

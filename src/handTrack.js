@@ -6,23 +6,24 @@ import { LandmarkFilterBank, OneEuroFilter } from './filters.js';
 export const DEFAULTS = {
   mirror: true,               // inference runs on the unmirrored frame; x is mirrored here (screen space)
   maxHands: 2,
-  confirmFrames: 4,           // consecutive detections before a track may drive anything
-  coastFrames: 6,             // frames a lost track coasts before it is dropped
+  confirmFrames: 2,           // consecutive detections before a track may drive anything
+  candidateMiss: 2,           // misses an unconfirmed candidate survives (MediaPipe flickers on new hands; 0 made hands pop in and out)
+  coastFrames: 3,             // frames a lost track coasts before it is dropped (covers 1-2 frame MediaPipe dropouts; 6 left a ghost hand drifting for 200 ms)
   coastDecay: 0.85,
   coastMaxSpeed: 4,           // clamp on coasting speed, in hand scales per second
   minScore: 0.5,              // minimum handedness score to spawn a track
   sMinFrac: 0.025, sMaxFrac: 0.45,   // plausible hand scale S as a fraction of the frame short side
-  sWorldMin: 0.05, sWorldMax: 0.16,  // plausible wrist->middle-MCP length in metres (world landmarks)
+  sWorldMin: 0.03, sWorldMax: 0.25,  // plausible wrist->middle-MCP length in metres (world landmarks; MediaPipe's metric scale is loose)
   maxScaleStep: 0.25,         // max |dS/S| between consecutive accepted frames
-  maxJump: 0.6,               // max landmark move per frame, in units of S, unless it persists
+  maxJump: 0.6,               // max whole-hand (centroid) move per frame beyond prediction, in units of S, unless it persists
   boneSoft: [0.5, 1.7],       // per-bone length / (S * nominal) soft limits
   boneHard: [0.25, 2.4],      // any bone outside this rejects the frame
-  boneSoftMax: 2,             // more than this many soft violations rejects the frame
+  boneSoftMax: 6,             // more than this many soft violations rejects the frame (curled / foreshortened fingers trip several)
   matchBase: 1.8, matchPerMiss: 0.6, // match radius in units of S: base + perMiss * missedFrames
   evictRatio: 1.4,            // an unmatched hand this much larger than the smallest track replaces it when slots are full
   crossFrames: 5,             // frames of reversed x-order needed before L/R slots swap
   roi: { x0: -0.15, y0: -0.15, x1: 1.15, y1: 1.3 }, // wrist must lie inside (normalised, screen space); wrists are often just off-frame
-  display: { minCutoff: 0.8, beta: 0.025, dCutoff: 1.0 }, // display-path One-Euro for the skeleton/palm (px units)
+  display: { minCutoff: 1.5, beta: 0.05, dCutoff: 1.0 }, // display-path One-Euro for the skeleton/palm (px units)
   // the four box-making fingertip coordinates get their own, much lighter filter: measured on a real recording this is within
   // ~0.3 px of the raw jitter floor but has a quarter of the lag of the skeleton filter (box feels attached, not floaty)
   tip: { minCutoff: 3.0, beta: 0.3, dCutoff: 1.0, velAlpha: 0.3 },
@@ -106,13 +107,6 @@ export class HandTracker {
     return soft > c.boneSoftMax ? 'bone' : '';
   }
 
-  /** max landmark displacement (px) between pose a and pose b shifted by (sx, sy); caller divides by S */
-  _maxJump(a, b, sx = 0, sy = 0) {
-    let m = 0;
-    for (let i = 0; i < 21; i++) m = Math.max(m, Math.hypot(a[i * 3] - b[i * 3] - sx, a[i * 3 + 1] - b[i * 3 + 1] - sy));
-    return m;
-  }
-
   _newTrack(d, t) {
     const c = this.cfg;
     const tr = {
@@ -171,8 +165,8 @@ export class HandTracker {
   }
 
   _confidence(tr) {
-    const ageF = Math.min(1, 0.4 + 0.6 * tr.total / 10);
-    tr.conf = tr.scoreEma * ageF * (1 - 0.5 * Math.min(1, tr.rejectEma)) * (tr.coasting ? 0.4 : 1);
+    // no age ramp: confirmation already proves the track; the ramp kept fresh hands below gesture minConf for ~3 more frames
+    tr.conf = tr.scoreEma * (1 - 0.5 * Math.min(1, tr.rejectEma)) * (tr.coasting ? 0.4 : 1);
   }
 
   /**
@@ -215,20 +209,23 @@ export class HandTracker {
       const d = match.get(ti);
       let accepted = false;
       if (d) {
-        let reason = d.reason;
+        // the bone gate keeps non-hands from spawning; on a confirmed hand it only fires on noisy world landmarks (curled fingers), so it must not freeze it
+        let reason = d.reason === 'bone' && tr.confirmed ? '' : d.reason;
         if (!reason) {
           const scaleStep = Math.abs(d.S / tr.S - 1);
           const dtP = Math.min(0.2, Math.max(0, (t - tr.lastT) / 1000));
           let sx = tr.rv[0] * dtP, sy = tr.rv[1] * dtP; const sm = Math.hypot(sx, sy), lim = 1.2 * tr.S;
           if (sm > lim) { sx *= lim / sm; sy *= lim / sm; }
-          const jump = this._maxJump(d.px, tr.raw, sx, sy) / tr.S;
+          // whole-hand move only: fingers flicking open/closed are real motion, a glitch displaces the entire hand
+          const jump = Math.hypot(d.c[0] - tr.c[0] - sx, d.c[1] - tr.c[1] - sy) / tr.S;
           // candidates that cannot drive anything yet are only held to the match radius; gates guard confirmed tracks
           if (tr.confirmed && (scaleStep > c.maxScaleStep || jump > c.maxJump)) {
-            // glitch unless it persists: a pending candidate that the new frame agrees with is accepted
-            const consistent = tr.pending && this._maxJump(d.px, tr.pending.px) / tr.S < c.maxJump
-              && Math.abs(d.S / tr.pending.S - 1) < c.maxScaleStep;
+            // glitch unless it persists: the new frame agrees with the pending one (relocation) or continues its motion (swipe from rest)
+            const p = tr.pending, lim2 = c.maxJump * tr.S;
+            const consistent = p && Math.abs(d.S / p.S - 1) < c.maxScaleStep
+              && (Math.hypot(d.c[0] - p.c[0], d.c[1] - p.c[1]) < lim2 || Math.hypot(d.c[0] - 2 * p.c[0] + tr.c[0], d.c[1] - 2 * p.c[1] + tr.c[1]) < lim2);
             if (consistent) { this._accept(tr, d, t); accepted = true; }
-            else { reason = scaleStep > c.maxScaleStep ? 'scale' : 'jump'; tr.pending = { px: d.px, S: d.S }; this.stats.gate[reason]++; }
+            else { reason = scaleStep > c.maxScaleStep ? 'scale' : 'jump'; tr.pending = { c: d.c, S: d.S }; this.stats.gate[reason]++; }
           } else { this._accept(tr, d, t); accepted = true; }
         }
         if (!accepted) { // rejected frame: hold the last good pose
@@ -241,7 +238,7 @@ export class HandTracker {
         this._coast(tr, t, dt);
       }
       if (accepted && !tr.confirmed && tr.age >= c.confirmFrames) { tr.confirmed = true; this.stats.confirms++; events.push({ type: 'confirm', id: tr.id }); }
-      const lost = tr.miss > c.coastFrames || (!tr.confirmed && tr.miss > 0);
+      const lost = tr.miss > c.coastFrames || (!tr.confirmed && tr.miss > c.candidateMiss);
       if (lost) { this.stats.drops++; if (tr.confirmed) this.stats.droppedConfirmed++; events.push({ type: 'drop', id: tr.id, confirmed: tr.confirmed }); }
       else { this._confidence(tr); keep.push(tr); }
     });
