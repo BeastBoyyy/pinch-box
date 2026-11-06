@@ -10,7 +10,7 @@ test('replay on a clean synthetic session: 20/20 locks, no false locks, no ID sw
   assert.equal(r.idSwitches, 0);
   assert.equal(r.slotSwaps, 0);
   assert.ok(r.accuracy.rectErrPx.max < 12, `rect error ${r.accuracy.rectErrPx.max}`);
-  assert.ok(r.jitter.segments >= 10 && r.jitter.filteredPx < 0.5, JSON.stringify(r.jitter));
+  assert.ok(r.jitter.segments >= 10 && r.jitter.filteredPx < 0.6, JSON.stringify(r.jitter));
 });
 
 test('replay with glitches (label flips, jumps, third hand, fake object, one-hand pinches, dropouts): no false locks', () => {

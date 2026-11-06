@@ -52,10 +52,10 @@ export function refreshPeriod(deltasMs) {
 }
 
 /**
- * Milliseconds between depth-model frames given the hand-tracker's inference time. Depth is the lowest priority job:
+ * Milliseconds between segmentation frames given the hand-tracker's inference time. Segmentation is the lowest priority job:
  * it slows down as inference gets slower and pauses (Infinity) when tracking is under pressure.
  */
-export function depthInterval(inferMs, { base = 100, ok = 18, pause = 35 } = {}) {
+export function segInterval(inferMs, { base = 33, ok = 18, pause = 35 } = {}) {
   if (!(inferMs < pause)) return Infinity;
   return inferMs <= ok ? base : base * (1 + 4 * (inferMs - ok) / (pause - ok));
 }

@@ -23,25 +23,20 @@ float histLayer(float age) { return mod(uHistHead - floor(age) + 96.0, 96.0); }
 vec3 hist(float layer, vec2 s) { return srgbToLinear(texture(uHist, vec3(1.0 - s.x, s.y, layer)).rgb); }
 `;
 
-/** smoothed relative depth (1 = near) with joint-bilateral upsampling guided by the video */
-export const DEPTH_GLSL = `
-uniform sampler2D uDepth; uniform vec2 uDepthSize;
-float depthTap(vec2 s) { return texture(uDepth, vec2(1.0 - s.x, s.y)).r; }
-float depthBilateral(vec2 s) {
-  vec2 pc = s * uDepthSize;
-  vec2 c0 = floor(pc - 0.5);
-  float lc = luma(vidLod(s, 1.0));
-  float acc = 0.0, ws = 0.0;
+/** person mask (1 = person). segAt reads a mip level: LOD 0 is the edge, high LODs are a soft body-shaped height field. personEdge snaps the
+ *  low-res mask to edges in the video (joint bilateral upsampling) so hair and fingers do not get a blocky halo. */
+export const SEG_GLSL = `
+uniform sampler2D uSeg; uniform vec2 uSegSize;
+float segAt(vec2 s, float lod) { return textureLod(uSeg, vec2(1.0 - s.x, s.y), lod).r; }
+float personEdge(vec2 s) {
+  vec2 pc = s * uSegSize, c0 = floor(pc - 0.5);
+  float lc = luma(vidLod(s, 1.0)), acc = 0.0, ws = 0.0;
   for (int j = 0; j < 3; j++) for (int i = 0; i < 3; i++) {
-    vec2 tc = (c0 + vec2(float(i), float(j)) + 0.5);
-    vec2 ts = tc / uDepthSize;
-    vec2 o = tc - pc;
-    float wsp = exp(-dot(o, o) * 0.9);
+    vec2 tc = c0 + vec2(float(i), float(j)) + 0.5, ts = tc / uSegSize, o = tc - pc;
     float dl = luma(vidLod(ts, 1.5)) - lc;
-    float wr = exp(-dl * dl / (2.0 * 0.05 * 0.05));
-    float w = wsp * wr + 1e-4;
-    acc += w * depthTap(ts); ws += w;
+    float w = exp(-dot(o, o) * 0.9) * exp(-dl * dl / 0.02) + 1e-4;
+    acc += w * segAt(ts, 0.0); ws += w;
   }
-  return acc / ws;
+  return smoothstep(0.38, 0.62, acc / ws);
 }
 `;

@@ -17,7 +17,7 @@
 4. [What it teaches us](#4-what-it-teaches-us)
 5. [How it works, step by step](#5-how-it-works-step-by-step)
 6. [Architecture](#6-architecture)
-7. [The 12 effects, explained simply](#7-the-12-effects-explained-simply)
+7. [The 10 effects, explained simply](#7-the-10-effects-explained-simply)
 8. [Problems we hit and how we solved them](#8-problems-we-hit-and-how-we-solved-them)
 9. [What we measured (and what we did not)](#9-what-we-measured-and-what-we-did-not)
 10. [Running it](#10-running-it)
@@ -34,14 +34,14 @@
 
 ## 1. The project in 30 seconds
 
-You stand in front of a webcam and hold both hands up with thumb and index finger open. A **rectangle appears between your hands** and follows your fingertips. When you **pinch with both hands**, the rectangle **locks in place** and an **effect starts running inside it on the live video** (an ink drawing, a TV glitch, a 3D point cloud, ...). Do it again and a **new box stacks on top**, each with the next effect. You can build a layered artwork of up to 12 effects using nothing but your hands.
+You stand in front of a webcam and hold both hands up with thumb and index finger open. A **rectangle appears between your hands** and follows your fingertips. When you **pinch with both hands**, the rectangle **locks in place** and an **effect starts running inside it on the live video** (thermal vision, a pink phosphor tube, a Renaissance painting, ...). Do it again and a **new box stacks on top**, each with the next effect. You can build a layered artwork of up to 12 effects using nothing but your hands.
 
 | | |
 |---|---|
 | **Input** | Your hands, seen by an ordinary webcam |
 | **Output** | Your own live video with up to 12 stacked, GPU-rendered effects |
 | **Runs on** | A normal laptop in Chrome or Edge. It is a web page; Node.js is only needed to start the small local server |
-| **Artificial intelligence used** | A hand-landmark model (Google MediaPipe) finds 21 points on each hand; an optional depth model (Depth Anything V2 Small) feeds two effects |
+| **Artificial intelligence used** | A hand-landmark model (Google MediaPipe) finds 21 points on each hand; a person-segmentation model (MediaPipe selfie segmenter) cuts you out of the room for two effects |
 | **Everything else** | Written by us: hand validation, smoothing, gesture logic, box tracking, a WebGL renderer and 12 shader effects |
 | **Size** | About 4,100 lines of JavaScript/GLSL and 39 automated tests |
 
@@ -100,7 +100,7 @@ Each row names an idea, what it means in this project, and the file to open if y
 | **Debugging from real data** | Real recordings showed problems that no simulation predicted (Section 8). The lesson: record real sessions early | `tools/replay.js` |
 | **Human factors** | People pinch with their hands out of sync, move while pinched, and cannot see their fingers under an effect. The design had to forgive this and give clear feedback | `src/gesture.js`, feedback ring in `src/render.js` |
 | **Privacy by design** | Video is processed on the device; nothing is uploaded (Section 13) | whole project |
-| **Building on open source, with credit** | MediaPipe and an open depth model do the hard AI parts, and we credit them (Section 18) | |
+| **Building on open source, with credit** | MediaPipe's hand and segmentation models do the hard AI parts, and we credit them (Section 18) | |
 
 ---
 
@@ -158,7 +158,7 @@ Think of the program as a relay race. A frame of video passes through these stat
 |            governor.js v                                               |
 |                    <canvas>  +  hud.js (numbers, sliders)              |
 |                                                                        |
-|  depth.worker.js  (only while a depth effect is in use)                |
+|  seg.worker.js  (only while a box needs the person mask)               |
 +------------------------------------------------------------------------+
 ```
 
@@ -181,8 +181,9 @@ Think of the program as a relay race. A frame of video passes through these stat
 | `src/gesture.js` | The gesture state machine, per-hand pinch freeze, box stack, calibration |
 | `src/render.js` | WebGL2 renderer: camera texture, 96-frame history, box compositing, flourish, overlays |
 | `src/pipeline.js`, `src/governor.js` | Per-box GPU targets; the quality governor |
-| `src/effects/*.js` | The 12 effects (GLSL shader + parameters + 3 presets each) |
-| `src/depthProvider.js`, `src/depth.worker.js` | Shared depth map: AI model, or an approximate fallback |
+| `src/effects/*.js` | The 10 effects (GLSL shader + parameters + 3 presets each) |
+| `src/segProvider.js`, `src/seg.worker.js` | Shared person mask: MediaPipe selfie segmenter, smoothed and mipmapped |
+| `src/blobs.js` | Blob detection and identity tracking for the blob tracking effect |
 | `src/hud.js`, `src/main.js` | Debug panel; wiring and the render loop |
 | `src/synthHand.js`, `src/synthSession.js` | Fake hands and fake sessions with known truth, for tests |
 | `tools/` | Local server, replay/measurement, visual QA, end-to-end tests, benchmark |
@@ -192,31 +193,29 @@ Think of the program as a relay race. A frame of video passes through these stat
 1. The camera frame is uploaded to the GPU once per frame and also copied into a ring buffer of the last 96 frames (some effects look back in time).
 2. For each locked box, in order, its effect shader renders into the box's own off-screen image.
 3. That image is composited onto everything beneath it through a rounded-rectangle mask with a soft edge, shadow, and the lock flourish animation.
-4. Boxes can see what is below them (the frosted-glass box blurs the boxes beneath it).
+4. Boxes stack in the order they were locked, each compositing over what is beneath it.
 5. Last: the live outline, the feedback ring, then a colour conversion with dithering to avoid banding.
 
 A deeper technical write-up with parameters and measurements is in [`docs/TECHNICAL.md`](docs/TECHNICAL.md).
 
 ---
 
-## 7. The 12 effects, explained simply
+## 7. The 10 effects, explained simply
 
-Every effect runs on the GPU and is written from scratch for this project. Locks pick them in this order (the order can be changed).
+Every effect runs on the GPU and is written from scratch for this project. Locks pick them in this order; press `1`-`9` or `0` (the tenth) to choose which one the next box gets.
 
 | # | Effect | What you see | The idea behind it |
 |---|---|---|---|
-| 1 | **Edge sketch** | Your face as an ink drawing on paper | Finds where brightness changes sharply (edges) at two scales and draws them as lines, with faint hatching and a colour fringe |
-| 2 | **Slit-scan** | Your movement smears into flowing ribbons | Each pixel shows a *different moment in time* from the last 96 frames; two frames are blended so there are no steps |
-| 3 | **Moire** | Rippling interference patterns that follow your face | Overlays fine line patterns at slightly different angles; where they beat against each other, waves appear |
-| 4 | **Pixel sorting** | Bright areas melt into streaks | A real sorting algorithm (odd-even transposition) runs on the GPU and sorts pixels by brightness inside bands |
-| 5 | **Frosted glass** | A pane of etched glass; you are a soft silhouette behind it | Blurs *everything beneath the box* (including earlier boxes), with grain, a shiny rim and a light streak |
-| 6 | **Data-mosh** | Digital glitch: parts of the picture smear and freeze | Imitates broken video compression: finds motion in 8x8 blocks and drags the *old* picture along instead of showing the new one, until a "keyframe" resets it |
-| 7 | **CRT** | An old curved TV | Barrel distortion, scanlines, RGB phosphor mask, glow, colour bleed, afterglow |
-| 8 | **Depth map** | You in rainbow colours by distance | An AI model estimates how far each pixel is; mapped to colours with contour lines and fog |
-| 9 | **Point cloud** | A glowing 3D hologram made of thousands of dots | Uses the same depth to place points in 3D, seen by a gently orbiting camera that reacts to your hands |
-| 10 | **Quadtree pixelation** | Big blocks where nothing happens, tiny blocks around your face and hands | Splits the picture into squares and keeps splitting only where there is detail |
-| 11 | **Cyanotype** | A blue-and-white sun-print photograph | Maps brightness to a Prussian-blue-to-paper ramp with paper fibres and uneven brush edges |
-| 12 | **Posterize + split** | Flat poster colours with red/green/blue ghosts | Reduces to 4 levels with an ordered dither; the colour channels drift apart *more when you move fast* |
+| 1 | **Blob tracking** | Thin white boxes with ids and coordinates lock onto whatever moves | A small motion mask is read back from the GPU without stalling it, split into connected regions, and each region keeps its id from frame to frame |
+| 2 | **Thermal vision** | You glow hot against a cold room | The person mask makes you the hot object, skin runs hotter than clothes, then a thermal palette with coarse sensor pixels and column noise |
+| 3 | **Night vision** | Green image-intensifier tube | Automatic gain, noise that grows where the signal is weak, sparks, phosphor lag and highlight bloom |
+| 4 | **Flash light** | The box goes dark and your hands are torches | The beam leaves your index fingertip the way it points, with a hot core, a soft ring, dust in the beam and surfaces that catch the light |
+| 5 | **CRT** | An old curved TV | Barrel distortion, scanlines, RGB phosphor mask, glow, colour bleed, afterglow |
+| 6 | **1-bit dither** | Two inks and nothing else | Ordered Bayer, noise or line screens on chunky pixels, read against the local brightness so bright and dark rooms both keep their detail |
+| 7 | **Pink phosphor** | A monochrome tube with a pink coating | The CRT screen with one phosphor, long trails, and outlines that burn brightest |
+| 8 | **Halftone print** | A comic or newspaper print | Each ink has its own rotated dot screen, dot area follows ink coverage, plates sit slightly out of register |
+| 9 | **Renaissance painting** | Inside the box you become an oil portrait in a gilded frame | The person mask paints you into a real ceiling painting (`assets/renaissance/`): your face stays sharp in oil flesh tones, your clothes become satin drapery, the painting's own light falls on you, then gold leaf, fine cracks and a carved gilt frame |
+| 10 | **Comic hero** | Inside the box you become an original inked comic character | Clothes become a cel-shaded suit with energy lines, the room becomes a printed panel with speed lines and dots, and energy arcs crackle round your tracked fingertips |
 
 Each effect has sliders (press `D`) and three presets (`P`). Screenshots of every effect are in `qa/`.
 
@@ -287,7 +286,7 @@ npm start          # starts the local server
 
 Open **http://localhost:8080** and allow the camera.
 
-After setup, **hand tracking works with no internet**. The *depth model* (effects 8 and 9) is downloaded from the internet the first time it is needed (a few tens of MB) and then cached. Without internet those two effects use an *approximate* depth and say so in the corner of the screen.
+After setup, **everything works with no internet**: the hand model and the segmentation model are both on disk.
 
 | URL | Purpose |
 |---|---|
@@ -302,7 +301,7 @@ To keep the repository small and free of other people's media, these are **gener
 
 | Folder | What | How to get it |
 |---|---|---|
-| `vendor/`, `models/` | MediaPipe runtime, hand model, depth model and its runtime | `npm install` then `npm run setup` (downloads them) |
+| `vendor/`, `models/` | MediaPipe runtime, hand model, segmentation model | `npm install` then `npm run setup` (downloads them) |
 | `fixtures/` | A short test video (`fixtures/sample.mp4`) used by `?src=`, `?fake=1` demo mode, the QA tool and one regression test | Put any short video of a person at `fixtures/sample.mp4`. Without it the demo mode and `tools/qa.js` need your own `--src`, and the real-landmark regression test is skipped |
 | `qa/` | Screenshots of every effect, benchmark output | `node tools/qa.js`, `node tools/bench.js` |
 | `dist/` | The Windows exe | `npm run dist` |
@@ -322,7 +321,7 @@ Tools:
 ```bash
 npm test                              # 39 automated tests
 node tools/replay.js session.json     # measure a recorded session
-node tools/qa.js                      # screenshot all 12 effects into qa/
+node tools/qa.js                      # screenshot all 10 effects into qa/
 node tools/bench.js                   # GPU cost per effect
 node tools/e2e.js                     # end-to-end run with synthetic hands
 ```
@@ -353,7 +352,7 @@ node tools/e2e.js                     # end-to-end run with synthetic hands
 1. **Let them try it** (30 s). Ask for two open "L" hands, then a pinch. The ring turns green.
 2. **Press `S`:** "These are the 21 points the AI finds on each hand."
 3. **Press `D`:** "This is the computer's view: pinch ratio, confidence, and whether each hand is trusted. When it says *lock ready*, a pinch will lock." Show the numbers changing as someone pinches.
-4. **Show two contrasting effects:** Edge sketch (#1) and Point cloud (#9). "The point cloud is made from a depth map estimated by a second AI model from a single ordinary camera."
+4. **Show two contrasting effects:** Thermal vision (#2) and Renaissance painting (#9). "A second AI model separates the person from the room, so we can treat you as the hot object, or paint you into a portrait."
 5. **Tell one problem story** from Section 8: the left-hand story (8.1) or the floaty box (8.2).
 6. **Finish with:** "The real work was not the AI. It was filtering noise, deciding what counts as a pinch, and testing with real recordings."
 
@@ -365,13 +364,13 @@ node tools/e2e.js                     # end-to-end run with synthetic hands
 ### 11.6 Likely questions and honest answers
 
 **Is this AI?**
-Partly. A neural network (MediaPipe) finds hand points, and a second model estimates depth for two effects. The gesture recognition, tracking, smoothing and graphics are ordinary algorithms we wrote.
+Partly. A neural network (MediaPipe) finds hand points, and a second model separates the person from the room for two effects. The gesture recognition, tracking, smoothing and graphics are ordinary algorithms we wrote.
 
 **Did you train the AI?**
-No. We used Google's pre-trained MediaPipe model and an open depth model. Our work was everything around them, which is most of what makes the interface usable.
+No. We used Google's pre-trained MediaPipe models. Our work was everything around them, which is most of what makes the interface usable.
 
 **Does it record me or send my video anywhere?**
-No. Processing is on the laptop. The only thing that touches the internet is the optional first-time download of the depth model. Recording only happens if someone presses `R`, and it saves hand landmark numbers (not video) to a file on the computer.
+No. Processing is on the laptop. Nothing touches the internet while it runs. Recording only happens if someone presses `R`, and it saves hand landmark numbers (not video) to a file on the computer.
 
 **Why a web browser?**
 Nothing to install for the user, it runs on any laptop, the browser gives direct access to the camera and the GPU, and the video never has to leave the device.
@@ -379,8 +378,8 @@ Nothing to install for the user, it runs on any laptop, the browser gives direct
 **How accurate is it?**
 We tuned it using recordings of our own hands and tests with fake hands where the right answer is known. We have not run a formal accuracy study with many users, and we say so (Section 9).
 
-**How can it work out depth from one camera?**
-It cannot measure real distance. A trained model *estimates* which things are nearer than others from visual clues (size, perspective, shading). It gives relative depth, not centimetres.
+**How does it know where you end and the room begins?**
+A small trained model labels every pixel as person or background about 30 times a second. Its low-resolution mask is then snapped to edges in the video so hair and fingers stay clean.
 
 **Why does the box not follow my fingers at the exact moment I pinch?**
 Pinching moves the fingertips the box is attached to, so we freeze each hand's fingertips (relative to the palm) at the start of the closing motion. Otherwise the box would collapse every time you lock.
@@ -391,8 +390,8 @@ Only two hands are tracked. Other hands are ignored, and the two hands' sizes mu
 **Does it work in the dark or with gloves?**
 Poorly in the dark (the model needs to see the hand). Plain gloves are usually fine; very busy backgrounds can confuse it.
 
-**Why 12 effects?**
-Each shows a different graphics idea: edge detection, time sampling, interference, sorting, blur, video compression, display physics, depth, 3D points, adaptive subdivision, tone mapping and quantisation.
+**Why these 10 effects?**
+Each shows a different graphics idea: computer vision, sensor simulation, image intensifiers, light transport, display physics, quantisation, print screens and painting.
 
 **What was the hardest part?**
 Making the box feel *attached*: a balance between jitter, lag and prediction that we could only get right by recording real sessions and measuring.
@@ -414,7 +413,7 @@ See Section 15.
 | Box jumps or disappears | Keep both hands inside the frame (not off the bottom edge); avoid very fast moves |
 | Debug line says `NOT LOCKING: ...` | It names the exact reason (waiting for a pinch, hand not trusted, box too small, not armed, ...) |
 | Picture is choppy | Press `D` and read the render fps. Make sure the browser uses the dedicated GPU; the governor also lowers box resolution |
-| Depth effects look "approximate" | No internet for the first-time depth model download; connect once and reload |
+| Thermal, Renaissance or Comic hero show no person | The segmentation model is missing: run `npm run setup` |
 | Everything feels wrong | Press `D`, click **reset tuning**, then `C` to calibrate again |
 
 ---
@@ -422,7 +421,7 @@ See Section 15.
 ## 13. Privacy
 
 - The camera image is processed **only inside your browser on your own computer**. No server receives video. The local server only hands the web page its files.
-- The hand model is stored on disk in `models/`. The depth model, if used, is fetched from public hosting once and cached by the browser; no video is sent when it downloads.
+- The hand and segmentation models are stored on disk in `models/`; no video leaves the computer.
 - **Recording is opt-in.** Pressing `R` saves hand *landmark numbers* (21 points per hand with timestamps), **not the video**, to a file you download.
 - `fixtures/sample.mp4` is a short clip cut from the reference recording that inspired the project and contains a real person. It is used only for testing. **Remove or replace it before publishing the project anywhere public.**
 
@@ -435,7 +434,7 @@ See Section 15.
 - Fast movements can drop detection for a few frames; the box smooths over it but cannot see through it.
 - A hand leaving the picture (for example off the bottom edge) cannot be tracked.
 - Tested with our own hands and a few recordings, on one laptop and the Chrome/Edge browser family. Other users, browsers and cameras are untested.
-- Depth is **relative**, not metric, and is only as good as the model's guess.
+- The Renaissance and Comic hero looks are the camera picture restyled through the person mask, so they only show what the camera sees.
 - Not built: an optional second-stage fingertip refiner (the hook for it exists in `handTrack.js`).
 - The "99 %" accuracy figure from our original brief is a target we did not formally measure on real data (Section 9).
 
@@ -457,7 +456,7 @@ See Section 15.
 pinch-box/
 |-- index.html              the page
 |-- src/                    the app (see Section 6.3)
-|   `-- effects/            the 12 effects
+|   `-- effects/            the 10 effects
 |-- test/                   39 automated tests (node --test)
 |-- tools/                  server, setup, replay, QA, e2e, benchmark
 |-- docs/TECHNICAL.md       deep technical write-up and measurements
@@ -486,7 +485,7 @@ pinch-box/
 | **Shader** | A tiny program that runs on the GPU for every pixel |
 | **WebGL** | The browser's way to use the GPU for graphics |
 | **Worker** | A background thread in the browser so slow work does not freeze the page |
-| **Depth map** | An image where each pixel's value says how near or far that spot is |
+| **Segmentation mask** | An image where each pixel says whether that spot is a person or background |
 | **Governor** | Our component that lowers effect quality when the computer is overloaded |
 | **Calibration** | A 3-second step that teaches the program what an open and a pinched hand look like for *you* |
 
@@ -496,13 +495,13 @@ pinch-box/
 
 **Built with**
 - **MediaPipe Tasks Vision** (Google, Apache-2.0): hand landmark detection (v1.1.1, model `hand_landmarker.task`).
-- **Depth Anything V2 Small** (Apache-2.0), run in the browser with **Transformers.js** (Hugging Face, Apache-2.0): depth for effects 8 and 9. (The larger Depth Anything checkpoints are non-commercial and were deliberately not used.)
+- **MediaPipe selfie segmenter** (landscape, Apache-2.0): the person mask for effects 2, 9 and 10.
 - **Playwright** (Microsoft, Apache-2.0): used only for our automated tests and screenshots.
 
 **Ideas and published methods we implemented**
 - The **One-Euro filter**: Casiez, Roussel and Vogel, *"1 Euro Filter: a simple speed-based low-pass filter for noisy input in interactive systems"*, CHI 2012.
 - **OKLab** colour space (Bjorn Ottosson); **Turbo, Viridis and Inferno** colour maps (polynomial approximations).
-- **Dual-Kawase blur** (frosted glass), **odd-even transposition sort** (pixel sorting), **block matching / sum of absolute differences** (data-mosh), **quadtree subdivision**, **Bayer ordered dithering**.
+- **Connected-component labelling** (blob tracking), **Bayer ordered dithering** (1-bit dither), **Kuwahara filter** (Renaissance painting), **joint bilateral upsampling** (person mask edges).
 
 **Inspiration**
 - A TouchDesigner screen recording showing two-hand box locking, which we recreated from scratch in a browser. No code or assets from that project are used apart from the short test clip described in Section 13.

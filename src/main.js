@@ -3,14 +3,14 @@
 //             debug=1  skeleton=1  qa=1
 import { Renderer } from './render.js';
 import { Pipeline } from './pipeline.js';
-import { DepthProvider } from './depthProvider.js';
+import { SegProvider } from './segProvider.js';
 import { Camera, CameraError } from './camera.js';
 import { HandTracker, DEFAULTS as TRACK_DEFAULTS } from './handTrack.js';
 import { GestureEngine, GESTURE_DEFAULTS, Calibrator } from './gesture.js';
 import { Hud, loadTuning, saveTuning } from './hud.js';
 import { ordered, ALL } from './effects/index.js';
 import { applyPreset } from './effects/util.js';
-import { depthInterval, refreshPeriod } from './governor.js';
+import { segInterval, refreshPeriod } from './governor.js';
 import { makeSession, toFloat } from './synthSession.js';
 
 const q = new URLSearchParams(location.search);
@@ -22,7 +22,7 @@ const now = () => performance.now();
 const app = window.__pinchbox = { hud, q };
 const S = app.S = { // mutable app state read by the HUD
   paused: false, delegate: '', inferMs: 0, latencyMs: 0, busy: false, busySince: 0, workerReady: false,
-  recording: null, marks: [], calibrating: null, lastResult: null, depthBusy: false, depthReady: false, depthState: 'idle', lastDepthSend: 0,
+  recording: null, marks: [], calibrating: null, lastResult: null, segBusy: false, segState: 'idle', lastSegSend: 0,
   hands: { count: 0, lm: [null, null], rawCount: 0, raw: [null, null] }, skeleton: q.get('skeleton') === '1',
 };
 
@@ -34,7 +34,7 @@ async function main() {
   const effects = ordered(q.get('order') ? q.get('order').split(',').map(Number) : null);
   const pipeline = new Pipeline(renderer, effects);
   pipeline.gov.enabled = q.get('gov') !== '0';
-  renderer.depth = new DepthProvider(renderer);
+  renderer.seg = new SegProvider(renderer);
   Object.assign(app, { renderer, pipeline, effects });
 
   // ---- logic modules with saved tuning ---------------------------------------------------------
@@ -52,6 +52,10 @@ async function main() {
   // ---- camera ---------------------------------------------------------------------------------
   const camera = new Camera(video);
   const fake = q.get('fake') === '1', replay = q.get('replay');
+  // synced display (default): show the exact frame the hand model processed, with its landmarks, instead of the newest camera frame
+  // plus extrapolated landmarks. The box sits on the fingers in the picture (as in TouchDesigner); ?sync=0 restores the old path
+  const sync = q.get('sync') !== '0';
+  const synced = () => sync && now() - (S.syncT || -1e9) < 1000;   // falls back to the live video only if the tracker stops (paused / crashed)
   const src = q.get('src') || ((fake || replay) ? 'fixtures/sample.mp4' : null);
   let cam;
   try { cam = await camera.open(src); }
@@ -78,45 +82,50 @@ async function main() {
     if (worker) {
       worker.onmessage = ev => {
         const m = ev.data;
-        if (m.type === 'ready') { S.workerReady = true; S.delegate = m.delegate; hud.message(m.delegate === 'CPU' ? 'Hand tracking running on the CPU (GPU delegate unavailable) - expect lower fps.' : 'Raise both hands, thumb and index open.', m.delegate === 'CPU' ? 'warn' : 'info', 6000); }
+        if (m.type === 'ready') { S.workerReady = true; S.delegate = m.delegate; startSeg(); hud.message(m.delegate === 'CPU' ? 'Hand tracking running on the CPU (GPU delegate unavailable) - expect lower fps.' : 'Raise both hands, thumb and index open.', m.delegate === 'CPU' ? 'warn' : 'info', 6000); }
         else if (m.type === 'warn') hud.message(m.msg, 'warn', 9000);
         else if (m.type === 'error') { S.busy = false; if (!S.workerReady) hud.message('Hand model failed to load: ' + m.msg, 'error'); else console.warn('tracker error', m.msg); }
-        else if (m.type === 'result') { S.busy = false; onResult(m); }
+        else if (m.type === 'result') {
+          S.busy = false;
+          if (!sync || !m.bitmap) { m.bitmap?.close(); onResult(m); return; }
+          S.syncT = now();
+          createImageBitmap(m.bitmap, { imageOrientation: 'flipY' })
+            .then(b => { renderer.onCameraFrame(b); onResult(m); }, () => onResult(m))
+            .finally(() => m.bitmap.close());
+        }
       };
       worker.onerror = e => hud.message('Tracker worker crashed: ' + (e.message || 'unknown error'), 'error');
       worker.postMessage({ type: 'init', base: BASE, cfg: tuning.mp || undefined, delegate: (q.get('delegate') || '').toUpperCase() || undefined });
     }
   } else { S.workerReady = true; S.delegate = fake ? 'synthetic' : replay ? 'replay' : 'off'; }
 
-  // ---- depth worker (lazy) ----------------------------------------------------------------------
-  let dworker = null;
-  const startDepth = () => {
-    if (dworker || S.depthState === 'failed') return;
-    S.depthState = 'loading';
-    try { dworker = new Worker(new URL('depth.worker.js', import.meta.url), { type: 'module' }); } catch (e) { S.depthState = 'failed'; return; }
-    dworker.onmessage = ev => {
+  // ---- person segmentation worker (lazy) ----------------------------------------------------------
+  let sworker = null;
+  const startSeg = () => {
+    if (sworker || S.segState === 'failed') return;
+    S.segState = 'loading';
+    try { sworker = new Worker(new URL('seg.worker.js', import.meta.url)); } catch (e) { S.segState = 'failed'; return; }
+    sworker.onmessage = ev => {
       const m = ev.data;
-      if (m.type === 'ready') { S.depthReady = true; S.depthState = 'ready'; hud.message('', 'info'); }
-      else if (m.type === 'progress') { if (m.status === 'progress' && m.progress != null && !S.depthReady) hud.message(`Loading depth model… ${Math.round(m.progress)}%  (using approximate depth meanwhile)`, 'info'); }
-      else if (m.type === 'depth') { S.depthBusy = false; renderer.depth.setModelDepth(m.data, m.w, m.h); }
-      else if (m.type === 'error') { S.depthBusy = false; console.warn('depth worker error:', m.msg); if (!S.depthReady) { S.depthState = 'failed'; hud.message('Depth model unavailable (' + m.msg + '); using approximate depth.', 'warn', 8000); } }
+      if (m.type === 'ready') S.segState = 'ready';
+      else if (m.type === 'mask') { S.segBusy = false; S.segMs = m.inferMs; renderer.seg.setMask(m.data, m.w, m.h); }
+      else if (m.type === 'error') { S.segBusy = false; console.warn('segmentation error:', m.msg); if (S.segState !== 'ready') { S.segState = 'failed'; hud.message('Person segmentation unavailable (' + m.msg + ')', 'warn', 8000); } }
     };
-    dworker.postMessage({ type: 'init', base: BASE });
+    sworker.postMessage({ type: 'init', base: BASE });
   };
 
   // ---- frame pump -------------------------------------------------------------------------------
-  const sendToDepth = t => {
-    if (!pipeline.needsDepth || !S.depthReady || S.depthBusy) return;
-    if (t - S.lastDepthSend < depthInterval(S.inferMs)) return;
-    S.lastDepthSend = t; S.depthBusy = true;
-    const vw = video.videoWidth, vh = video.videoHeight, k = 384 / Math.max(vw, vh);
+  const sendToSeg = (t, capT) => {
+    if (S.segState !== 'ready' || S.segBusy || t - S.lastSegSend < segInterval(S.inferMs)) return;
+    S.lastSegSend = t; S.segBusy = true;
+    const vw = video.videoWidth, vh = video.videoHeight, k = 512 / Math.max(vw, vh);
     createImageBitmap(video, { resizeWidth: Math.round(vw * k), resizeHeight: Math.round(vh * k) })
-      .then(bm => dworker.postMessage({ type: 'frame', bitmap: bm }, [bm])).catch(() => { S.depthBusy = false; });
+      .then(bm => sworker.postMessage({ type: 'frame', bitmap: bm, t: capT }, [bm])).catch(() => { S.segBusy = false; });
   };
   camera.start((t, v) => {
     S.vidT = t; S.vidArr = now();                       // capture time of the frame that is about to be shown, and when it arrived
-    renderer.onCameraFrame();
-    if (pipeline.needsDepth) { if (!dworker) startDepth(); sendToDepth(now()); }
+    if (!synced()) renderer.onCameraFrame();
+    if (pipeline.needsSeg) { if (!sworker) startSeg(); sendToSeg(now(), t); }
     if (!worker || !S.workerReady || S.paused) return;
     if (S.busy && now() - S.busySince < 3000) return; // drop frames while inference is busy: never queue
     S.busy = true; S.busySince = now();
@@ -142,17 +151,19 @@ async function main() {
     S.lastTracks = f;
     const events = gesture.update(f);
     applyEvents(events);
-    // overlays + parallax + depth blobs from the confirmed tracks
+    // overlays + flashlight aim from the confirmed tracks
     const H = S.hands; H.count = 0; H.rawCount = 0;
     let cx = 0, cy = 0, n = 0;
-    const blobs = renderer.depth.blobs; blobs.fill(0);
+    const aim = renderer.aim; aim.n = 0;
     for (const tr of f.tracks) {
       if (!tr.confirmed) continue;
-      H.lm[H.count++] = tr.lm; H.raw[H.rawCount++] = tr.raw;
+      H.lm[H.count++] = synced() ? tr.raw : tr.lm; H.raw[H.rawCount++] = tr.raw;   // synced: the skeleton is drawn on its own frame, no smoothing lag
       const x = tr.c[0] / res.w, y = tr.c[1] / res.h; cx += x; cy += y; n++;
-      const o = (n - 1) * 4; if (o < 8) { blobs[o] = x; blobs[o + 1] = 1 - y; blobs[o + 2] = tr.S * 1.4 / res.w; blobs[o + 3] = 1; }
+      if (aim.n < 2 && tr.tips) {
+        const o = aim.n++ * 4, tp = tr.tips, dx = (tp[2] - tp[4]) / res.w, dy = -(tp[3] - tp[5]) / res.h, l = Math.hypot(dx, dy) || 1;
+        aim.p[o] = tp[2] / res.w; aim.p[o + 1] = 1 - tp[3] / res.h; aim.p[o + 2] = dx / l; aim.p[o + 3] = dy / l;
+      }
     }
-    if (n) { app.parallaxTarget[0] = cx / n * 2 - 1; app.parallaxTarget[1] = 1 - (cy / n) * 2; } else { app.parallaxTarget[0] = 0; app.parallaxTarget[1] = 0; }
     // calibration
     if (calibrator.active) {
       let best = null; for (const tr of f.tracks) if (tr.confirmed && !tr.coasting && (!best || tr.conf > best.conf)) best = tr;
@@ -160,7 +171,6 @@ async function main() {
       calibrator.feed(tNow, NaN);
     }
   }
-  app.parallaxTarget = [0, 0];
   app.onResult = onResult;
 
   // ---- synthetic / replayed hands (no camera hands needed) ----------------------------------------
@@ -254,6 +264,7 @@ async function main() {
     else if (k === 'm' && S.recording) { S.marks.push(now()); toast('Marked lock attempt', 800); }
     else if (k === 's') S.skeleton = !S.skeleton;
     else if (k === 'p') { const b = pipeline.last(); if (b) { applyPreset(b, (b.preset + 1) % 3); if (hud.debugOn) refreshEffectPanel(); } }
+    else if (k >= '0' && k <= '9' && (Number(k) || 10) <= effects.length) { gesture.count = (Number(k) || 10) - 1; toast(`Next box: ${effects[gesture.count].name}`); }   // 0 = the tenth
     else if (k === 'f') { document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen?.(); }
   });
 
@@ -263,7 +274,6 @@ async function main() {
     for (const tr of tracker.tracks) { const h = gesture.hand[tr.slot] || {}; hands.push({ slot: tr.slot, id: tr.id, confirmed: tr.confirmed, conf: tr.conf, S: tr.S, gate: tr.gates.reason, coasting: tr.coasting, rRaw: tr.pinchRaw, r: h.r, on: h.on }); }
     return { refreshHz: S.refreshHz, captureFps: camera.fps, inferMs: S.inferMs, latencyMs: S.latencyMs, renderFps: renderer.stats.renderFps, gpuMs: renderer.stats.gpuMs, delegate: S.delegate,
       boxes: pipeline.list.filter(b => !b.removing).length, paused: S.paused, recording: S.recording ? S.recording.frames.length : 0,
-      depthMode: pipeline.needsDepth ? renderer.depth.mode : '',
       cam: `${cam.width}x${cam.height} @ ${Math.round(cam.frameRate)} fps  ${cam.label || ''}`, scene: `${renderer.sceneW}x${renderer.sceneH}  ${renderer.caps.floatRT ? 'RGBA16F' : 'RGBA8'}  timer ${renderer.timerExt ? 'GPU' : 'rAF'}`,
       p95: pipeline.gov.p95(), budget: pipeline.gov.budgetMs, passLevel: pipeline.gov.passLevel,
       fsm: gesture.state, armed: gesture.armed, blocker: gesture.blocker, rOn: gesture.rOn, rOff: gesture.rOff, calibrated, hands, st: tracker.stats,
@@ -276,7 +286,7 @@ async function main() {
   if (qaEffect) {
     const W = video.videoWidth, Hh = video.videoHeight;
     const mkBox = (idx, r, id) => pipeline.add({ id, effectIndex: idx, rect: { x0: r[0] * W, y0: r[1] * Hh, x1: r[2] * W, y1: r[3] * Hh } }, W, Hh, now() - 5000);
-    // `under` boxes go first so stacking-aware effects (frosted glass) have something to see
+    // `under` boxes go first, to check how an effect stacks
     const under = (q.get('under') || '').split(',').filter(Boolean).map(Number);
     under.forEach((u, i) => mkBox(Math.max(0, effects.indexOf(ALL[u - 1])), [0.08 + 0.05 * i, 0.1, 0.55 + 0.05 * i, 0.9], 100 + i));
     const eff = ALL[Number(qaEffect) - 1];
@@ -288,7 +298,7 @@ async function main() {
   // ---- render loop -------------------------------------------------------------------------------
   const live = { visible: false, formed: false, pulse: 0, x0: 0, y0: 0, x1: 0, y1: 0 };
   const fb = { count: 0, mx: [0, 0], my: [0, 0], tx: [0, 0], ty: [0, 0], ix: [0, 0], iy: [0, 0], close: [0, 0], on: [false, false] };
-  const view = { video, boxes: pipeline.list, live, hands: S.hands, feedback: q.get('qa') === '1' ? null : fb, nowMs: 0, needsDepth: false };
+  const view = { video, boxes: pipeline.list, live, hands: S.hands, feedback: q.get('qa') === '1' ? null : fb, nowMs: 0 };
   const fbSlots = ['L', 'R'];
   const updateFeedback = () => { // always-on pinch feedback, drawn over every box so effects can never hide it
     let n = 0;
@@ -321,24 +331,23 @@ async function main() {
       pipeline.gov.budgetMs = renderer.timerExt ? Math.max(3, period * 0.8) : period * 1.25 + 1;
     }
     // live box: shown fingertips chase (filtered tips + velocity x time-to-now) with velocity feed-forward, evaluated every display frame
-    const tPred = (S.vidT || tNow) + (tNow - (S.vidArr || tNow));
-    const lv = gesture.displayTarget(tPred, dt);
+    // synced: the shown frame IS the tracked frame, so the box is drawn at its fingertips with no prediction and no chase
+    const sy = synced() && S.lastResult;
+    const tPred = sy ? S.lastResult.t : (S.vidT || tNow) + (tNow - (S.vidArr || tNow));
+    const lv = gesture.displayTarget(tPred, dt, !!sy);
     live.visible = lv.visible && !!S.lastResult; live.formed = lv.formed;
     if (live.visible) {
       live.x0 = lv.x0e; live.y0 = lv.y0e; live.x1 = lv.x1e; live.y1 = lv.y1e;
       live.pulse = gesture.state === 'PINCHING' ? 0.5 + 0.5 * Math.sin(tNow * 0.014) : 0;
     }
-    const k = 1 - Math.exp(-dt * 5);
-    renderer.hand.x += (app.parallaxTarget[0] - renderer.hand.x) * k; renderer.hand.y += (app.parallaxTarget[1] - renderer.hand.y) * k;
-    view.nowMs = tNow; view.needsDepth = pipeline.needsDepth;
+    view.nowMs = tNow;
     if (view.feedback) updateFeedback();
     S.hands.visible = S.skeleton || hud.debugOn;
     const hv = S.hands; const hc = hv.count, rc = hv.rawCount;
     if (!S.skeleton && !hud.debugOn) { hv.count = 0; hv.rawCount = 0; } else if (!hud.debugOn) hv.rawCount = 0;
     if (warmBox) { pipeline.discard(warmBox); warmBox = null; }
     if (warmQueue.length && renderer.tex.video && video.readyState >= 2 && !qaEffect) {
-      const i = warmQueue.shift(), eff = effects[i];
-      if (eff.needsDepth) renderer.depth.update(renderer, dt, true);
+      const i = warmQueue.shift();
       warmBox = pipeline.warm(i, S.lastResult ? S.lastResult.w : video.videoWidth, video.videoHeight);
     }
     renderer.frame(view, dt, app.qaStill ? 3.7 : (tNow - t0) / 1000);
@@ -349,7 +358,7 @@ async function main() {
   };
   requestAnimationFrame(loop);
   if (qaEffect && q.get('still') !== null) {
-    // freeze on a time stamp, pre-rolling history so slit-scan / data-mosh / posterize have frames to read
+    // freeze on a time stamp, pre-rolling history so effects that read past frames have them
     qa.ready = false; qa.busy = true;
     video.pause();
     const T = Number(q.get('still')), pre = Number(q.get('pre') ?? 60), fps = 30;
